@@ -1,6 +1,7 @@
 import esbuild from 'esbuild';
+import fs from 'node:fs';
 
-console.log('[Build] Bundling api/index.ts into api/index.js for Vercel...');
+console.log('[Build] Bundling api/index.ts for Vercel...');
 
 esbuild.buildSync({
   entryPoints: ['api/index.ts'],
@@ -11,4 +12,6 @@ esbuild.buildSync({
   outfile: 'api/index.js'
 });
 
-console.log('[Build] api/index.js generated successfully.');
+fs.copyFileSync('api/index.js', 'api/[...path].js');
+
+console.log('[Build] api/index.js and api/[...path].js generated successfully.');
