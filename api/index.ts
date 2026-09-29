@@ -25,8 +25,10 @@ export default async function handler(req: any, res: any) {
   } catch (err: any) {
     console.error('[Vercel Serverless] Handler error:', err);
     res.status(500).json({
-      error: err.message || 'Internal server error',
-      details: 'Check Vercel function logs'
+      error: 'Vercel Serverless Function Error',
+      message: err?.message || String(err),
+      hasDatabaseUrl: !!process.env.DATABASE_URL,
+      isVercel: !!process.env.VERCEL
     });
   }
 }

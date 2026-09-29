@@ -12,7 +12,21 @@ export const isPostgres = !!process.env.DATABASE_URL;
 
 const schema = process.env.DATABASE_SCHEMA || (isPostgres ? 'public' : 'helm');
 
-export const db = knex(isPostgres ? {
+function createMissingDbProxy() {
+  const errFn = () => {
+    throw new Error('DATABASE_URL is not configured on Vercel. Please add your Supabase DATABASE_URL in Vercel Project Settings (Settings -> Environment Variables).');
+  };
+  return new Proxy(errFn, {
+    get: (_target, prop) => {
+      if (prop === 'then') return undefined;
+      if (prop === 'raw') return async () => { throw new Error('DATABASE_URL is missing on Vercel.'); };
+      return errFn;
+    },
+    apply: () => { errFn(); }
+  });
+}
+
+export const db: any = (!isPostgres && isVercel) ? createMissingDbProxy() : knex(isPostgres ? {
   client: 'pg',
   connection: {
     connectionString: process.env.DATABASE_URL,
@@ -42,6 +56,10 @@ export const db = knex(isPostgres ? {
 
 export const now = () => new Date().toISOString();
 export async function migrate() {
+  if (!isPostgres && isVercel) {
+    console.warn('[Vercel Serverless] DATABASE_URL is not set. Migrations skipped.');
+    return;
+  }
   if (isPostgres && schema !== 'public') {
     if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error('Invalid schema');
     await db.raw(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
@@ -57,7 +75,7 @@ export async function migrate() {
       await k.schema.createTable('comments',(t:any)=>{t.uuid('id').primary();t.uuid('issue_id').references('issues.id').index();t.uuid('user_id').references('users.id');t.text('body');t.boolean('internal').defaultTo(false);t.string('created_at');});
       await k.schema.createTable('activity',(t:any)=>{t.uuid('id').primary();t.uuid('issue_id').references('issues.id').index();t.uuid('user_id').references('users.id');t.string('action');t.text('detail');t.boolean('internal').defaultTo(false);t.string('created_at');});
       await k.schema.createTable('approvals',(t:any)=>{t.uuid('id').primary();t.uuid('issue_id').references('issues.id');t.uuid('admin_id').references('users.id');t.integer('cycle');t.text('summary');t.string('build');t.string('test_url',2048);t.string('created_at');t.unique(['issue_id','cycle']);});
-      await k.schema.createTable('attachments',(t:any)=>{t.uuid('id').primary();t.uuid('issue_id').references('issues.id');t.uuid('user_id').references('users.id');t.string('name');t.string('mime');t.integer('size');t.string('storage_key').unique();t.string('created_at').index();});
+      await k.schema.createTable('attachments',(t:any)=>{t.uuid('id').primary();t.uuid('issue_id').references('issues.id');t.uuid('user_id').references('users.id');t.string('name');t.string('mime');t.integer('size');t.string('storage_key').unique();t.text('data_base64');t.string('created_at').index();});
       await k.schema.createTable('events',(t:any)=>{t.uuid('id').primary();t.uuid('issue_id').references('issues.id');t.string('kind');t.integer('cycle');t.string('dedupe').unique();t.string('created_at');});
       await k.schema.createTable('deliveries',(t:any)=>{t.uuid('id').primary();t.uuid('event_id').references('events.id').index();t.string('recipient');t.string('subject');t.text('html');t.text('text');t.string('state').index();t.integer('attempts').defaultTo(0);t.string('next_attempt').index();t.string('lease_until');t.string('first_claim_at');t.string('provider_id').index();t.string('error');t.string('token_hash');t.string('token_expires');t.string('created_at');t.string('updated_at');t.unique(['event_id','recipient']);});
       await k.schema.createTable('attempts',(t:any)=>{t.uuid('id').primary();t.uuid('delivery_id').references('deliveries.id').index();t.string('state');t.string('error');t.string('execution_id');t.string('created_at');});
@@ -81,10 +99,22 @@ export async function migrate() {
     },
     down: async () => {}
   };
+  // Migration 003: add data_base64 column to attachments for persistent screenshot storage
+  const m003 = {
+    up: async (k:any) => {
+      const hasCol = await k.schema.hasColumn('attachments','data_base64');
+      if(!hasCol){
+        await k.schema.table('attachments',(t:any)=>{
+          t.text('data_base64');
+        });
+      }
+    },
+    down: async () => {}
+  };
   await db.migrate.latest({migrationSource:{
-    getMigrations: async () => ['001','002'],
+    getMigrations: async () => ['001','002','003'],
     getMigrationName: (m:string) => m,
-    getMigration: async (m:string) => m==='001' ? m001 : m002,
+    getMigration: async (m:string) => m==='001' ? m001 : m==='002' ? m002 : m003,
   }});
 
   // Ensure default guest user exists

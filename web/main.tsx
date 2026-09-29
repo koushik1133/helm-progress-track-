@@ -330,8 +330,16 @@ function App() {
           xhr.open('POST', '/api/guest/upload');
           xhr.setRequestHeader('X-Helm-Request', '1');
           xhr.upload.onprogress = e => { if (e.lengthComputable) setUploadProgress(Math.round(e.loaded / e.total * 100)); };
-          xhr.onload = () => { try { const d = JSON.parse(xhr.responseText); xhr.status < 300 ? resolve(d) : reject(new Error(d.error)); } catch { reject(new Error('Upload failed.')); } };
-          xhr.onerror = () => reject(new Error('Upload failed.'));
+          xhr.onload = () => {
+            try {
+              const d = JSON.parse(xhr.responseText);
+              xhr.status < 300 ? resolve(d) : reject(new Error(d.error || d.message || `Upload failed (${xhr.status})`));
+            } catch {
+              const msg = xhr.responseText ? xhr.responseText.slice(0, 150) : `HTTP ${xhr.status}`;
+              reject(new Error(`Upload failed: ${msg}`));
+            }
+          };
+          xhr.onerror = () => reject(new Error('Upload failed: network connection interrupted.'));
           xhr.send(f);
         });
         done.push({ ...saved, preview: URL.createObjectURL(file) });

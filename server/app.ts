@@ -27,7 +27,7 @@ export function createApp(){
  res.json({ok:true});
  });app.use(express.json({limit:'100kb'}));app.use(cookieParser());
  app.use('/api',async(req,res,next)=>{try{res.setHeader('Cache-Control','no-store');if(!['GET','HEAD','OPTIONS'].includes(req.method)&&!req.path.startsWith('/integration/')){const origin=req.get('origin');if(origin){const originUrl=new URL(origin);const host=req.get('host');const isSameHost=host&&originUrl.host===host;const isConfiguredApp=origin===new URL(appURL()).origin;const isVercelOrigin=originUrl.hostname.endsWith('.vercel.app')||originUrl.hostname==='localhost'||originUrl.hostname==='127.0.0.1';if(!isSameHost&&!isConfiguredApp&&!isVercelOrigin)throw fail(403,'Request origin is not allowed.');}if(!req.get('x-helm-request'))throw fail(403,'Missing request protection header.');}await rateLimit(`api:${req.ip}`,600,1);next();}catch(e){next(e);}});
- app.get('/api/health',async(req,res)=>{try{await db.raw('select 1');res.json({ok:true,database:isPostgres?'postgres':'sqlite',mode:production?'production':'local'});}catch(e:any){res.status(500).json({ok:false,error:e.message});}});
+ app.get('/api/health',async(req,res)=>{let dbOk=false;let dbErr=null;try{if(isPostgres||!isVercel){await db.raw('select 1');dbOk=true;}}catch(e:any){dbErr=e.message;}res.json({ok:true,database:isPostgres?'postgres':'sqlite',databaseConnected:dbOk,dbError:dbErr,isVercel,mode:production?'production':'local'});});
  app.get('/api/db-status',async(req,res)=>{try{await db.raw('select 1');const projects=await db('projects').select('id','name');const count=await db('issues').count({total:'id'}).first();res.json({ok:true,connected:true,driver:isPostgres?'postgres':'sqlite',database:isPostgres?'PostgreSQL (Connected)':'Local SQLite (Active)',isVercel,projectsCount:projects.length,issuesCount:Number(count?.total||0)});}catch(e:any){res.status(500).json({ok:false,connected:false,driver:isPostgres?'postgres':'sqlite',error:e.message||'Database query failed'});}});
  app.get('/api/auth/me',auth,(req,res)=>res.json({user:publicUser((req as any).user),mode:production?'production':'local'}));
  app.post('/api/auth/login',async(req,res)=>{await rateLimit(`login:${req.ip}`,15,15);const data=z.object({email:z.email().max(254),password:z.string().max(256)}).parse(req.body);const u=await db('users').where({email:data.email.toLowerCase()}).first();const valid=passwordValid(data.password,u?.password_hash||passwordHash('invalid-placeholder-password'));if(!u||!valid||!u.active||!u.verified)throw fail(401,'Email or password is incorrect.');await session(res,u.id);res.json({user:publicUser(u)});});
@@ -37,12 +37,40 @@ export function createApp(){
   const guestUpload=multer({storage:multer.memoryStorage(),limits:{fileSize:10*1024*1024,files:1}});
   app.post('/api/guest/upload',guestUpload.single('file'),async(req,res)=>{
     if(!req.file)throw fail(400,'Choose a screenshot.');
+    let guestUser=await db('users').where({email:'guest@helm.local'}).first();
+    if(!guestUser){
+      const gid=randomUUID();
+      await db('users').insert({id:gid,email:'guest@helm.local',name:'Guest',role:'tester',password_hash:'',verified:true,active:true,created_at:now()});
+      guestUser=await db('users').where({id:gid}).first();
+    }
     const bytes=await storage.validateImage(req.file.buffer,req.file.mimetype);
     const id=randomUUID();
     await storage.put(id,bytes,req.file.mimetype);
-    try{await db('attachments').insert({id,user_id:null,name:path.basename(req.file.originalname).slice(0,200),mime:req.file.mimetype,size:bytes.length,storage_key:id,created_at:now()});}
-    catch(e){await storage.remove(id);throw e;}
+    const base64Data=bytes.toString('base64');
+    try{
+      await db('attachments').insert({id,user_id:guestUser?guestUser.id:null,name:path.basename(req.file.originalname).slice(0,200),mime:req.file.mimetype,size:bytes.length,storage_key:id,data_base64:base64Data,created_at:now()});
+    }catch(e){
+      try{
+        await db('attachments').insert({id,user_id:guestUser?guestUser.id:null,name:path.basename(req.file.originalname).slice(0,200),mime:req.file.mimetype,size:bytes.length,storage_key:id,created_at:now()});
+      }catch(err){
+        await storage.remove(id);
+        throw e;
+      }
+    }
     res.status(201).json({id,name:req.file.originalname,size:bytes.length});
+  });
+  app.get('/api/guest/attachments/:id',async(req,res)=>{
+    const a=await db('attachments').where({id:req.params.id}).first();
+    if(!a)throw fail(404,'Screenshot not found.');
+    res.setHeader('Content-Type',a.mime||'image/png');
+    res.setHeader('Content-Disposition','inline');
+    if(a.data_base64){
+      return res.send(Buffer.from(a.data_base64,'base64'));
+    }
+    const f=await storage.download(a.storage_key);
+    if(f.url)return res.redirect(f.url);
+    if(f.file)return res.sendFile(f.file);
+    throw fail(404,'Screenshot file missing.');
   });
   app.post('/api/guest/submit',async(req,res)=>{
     await rateLimit('guest:'+req.ip,20,60);

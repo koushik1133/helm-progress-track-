@@ -2,23 +2,53 @@ import {S3Client,PutObjectCommand,GetObjectCommand,DeleteObjectCommand} from '@a
 import {getSignedUrl} from '@aws-sdk/s3-request-presigner';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import sharp from 'sharp';
 import {dataDir} from './db.js';
 import {fail} from './auth.js';
 const s3=process.env.S3_ENDPOINT?new S3Client({endpoint:process.env.S3_ENDPOINT,region:process.env.S3_REGION||'us-east-1',forcePathStyle:true,credentials:{accessKeyId:process.env.S3_ACCESS_KEY_ID||'',secretAccessKey:process.env.S3_SECRET_ACCESS_KEY||''}}):null;
 const bucket=process.env.S3_BUCKET||'helm-screenshots';
-export async function validateImage(buffer:Buffer,mime:string){
- const format=buffer.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))?'png':buffer[0]===255&&buffer[1]===216&&buffer[2]===255?'jpeg':buffer.toString('ascii',0,4)==='RIFF'&&buffer.toString('ascii',8,12)==='WEBP'?'webp':null;
- if(!format||mime!==`image/${format}`)throw fail(400,'Only valid PNG, JPEG and WebP screenshots are allowed.');
- try{
-   const meta=await sharp(buffer,{limitInputPixels:40_000_000}).metadata();
-   if(meta.pages&&meta.pages>1)throw new Error('Animated image');
-   return await sharp(buffer,{limitInputPixels:40_000_000}).toFormat(format).toBuffer();
- }catch(err:any){
-   if(err.message==='Animated image')throw fail(400,'The image is animated.');
-   // If sharp has native binding issues or fails on specific image variants, accept the verified buffer
-   return buffer;
- }
+let sharpModule: any = null;
+async function getSharp() {
+  if (sharpModule === null) {
+    try {
+      const s = await import('sharp');
+      sharpModule = s.default || s;
+    } catch {
+      sharpModule = false;
+    }
+  }
+  return sharpModule;
+}
+
+export async function validateImage(buffer: Buffer, mime: string) {
+  const normMime = (mime || '').toLowerCase().trim();
+  const isJpgMime = normMime === 'image/jpeg' || normMime === 'image/jpg' || normMime === 'image/pjpeg';
+  const isPngMime = normMime === 'image/png';
+  const isWebpMime = normMime === 'image/webp';
+
+  const format = buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    ? 'png'
+    : buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255
+    ? 'jpeg'
+    : buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP'
+    ? 'webp'
+    : null;
+
+  if (!format) throw fail(400, 'Only valid PNG, JPEG and WebP screenshots are allowed.');
+  if (format === 'png' && !isPngMime) throw fail(400, 'Invalid image format (PNG expected).');
+  if (format === 'jpeg' && !isJpgMime) throw fail(400, 'Invalid image format (JPEG expected).');
+  if (format === 'webp' && !isWebpMime) throw fail(400, 'Invalid image format (WebP expected).');
+
+  try {
+    const sharp = await getSharp();
+    if (sharp) {
+      const meta = await sharp(buffer, { limitInputPixels: 40_000_000 }).metadata();
+      if (meta.pages && meta.pages > 1) throw new Error('Animated image');
+      return await sharp(buffer, { limitInputPixels: 40_000_000 }).toFormat(format).toBuffer();
+    }
+  } catch (err: any) {
+    if (err.message === 'Animated image') throw fail(400, 'The image is animated.');
+  }
+  return buffer;
 }
 export async function put(key:string,buffer:Buffer,mime:string){
   if(s3)await s3.send(new PutObjectCommand({Bucket:bucket,Key:key,Body:buffer,ContentType:mime}));
