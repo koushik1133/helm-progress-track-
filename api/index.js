@@ -527,11 +527,11 @@ async function attach(q, ids, issueId, userId) {
   if (bound !== new Set(ids).size) throw fail(409, "An upload was already attached. Please refresh.");
 }
 function createApp() {
-  const app = express();
-  app.disable("x-powered-by");
-  app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || 0));
-  app.use(helmet({ contentSecurityPolicy: production ? void 0 : false }));
-  app.post("/api/provider/resend", express.raw({ type: "application/json", limit: "100kb" }), async (req, res) => {
+  const app2 = express();
+  app2.disable("x-powered-by");
+  app2.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || 0));
+  app2.use(helmet({ contentSecurityPolicy: production ? void 0 : false }));
+  app2.post("/api/provider/resend", express.raw({ type: "application/json", limit: "100kb" }), async (req, res) => {
     if (!process.env.RESEND_WEBHOOK_SECRET) throw fail(503, "Delivery webhook is not configured.");
     let event;
     try {
@@ -545,9 +545,9 @@ function createApp() {
     }
     res.json({ ok: true });
   });
-  app.use(express.json({ limit: "100kb" }));
-  app.use(cookieParser());
-  app.use("/api", async (req, res, next) => {
+  app2.use(express.json({ limit: "100kb" }));
+  app2.use(cookieParser());
+  app2.use("/api", async (req, res, next) => {
     try {
       res.setHeader("Cache-Control", "no-store");
       if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !req.path.startsWith("/integration/")) {
@@ -568,7 +568,7 @@ function createApp() {
       next(e);
     }
   });
-  app.get("/api/health", async (req, res) => {
+  app2.get("/api/health", async (req, res) => {
     let dbOk = false;
     let dbErr = null;
     try {
@@ -581,7 +581,7 @@ function createApp() {
     }
     res.json({ ok: true, database: isPostgres ? "postgres" : "sqlite", databaseConnected: dbOk, dbError: dbErr, isVercel, mode: production ? "production" : "local" });
   });
-  app.get("/api/db-status", async (req, res) => {
+  app2.get("/api/db-status", async (req, res) => {
     try {
       await db.raw("select 1");
       const projects = await db("projects").select("id", "name");
@@ -591,8 +591,8 @@ function createApp() {
       res.status(500).json({ ok: false, connected: false, driver: isPostgres ? "postgres" : "sqlite", error: e.message || "Database query failed" });
     }
   });
-  app.get("/api/auth/me", auth, (req, res) => res.json({ user: publicUser(req.user), mode: production ? "production" : "local" }));
-  app.post("/api/auth/login", async (req, res) => {
+  app2.get("/api/auth/me", auth, (req, res) => res.json({ user: publicUser(req.user), mode: production ? "production" : "local" }));
+  app2.post("/api/auth/login", async (req, res) => {
     await rateLimit(`login:${req.ip}`, 15, 15);
     const data = z.object({ email: z.email().max(254), password: z.string().max(256) }).parse(req.body);
     const u = await db("users").where({ email: data.email.toLowerCase() }).first();
@@ -601,12 +601,12 @@ function createApp() {
     await session(res, u.id);
     res.json({ user: publicUser(u) });
   });
-  app.post("/api/auth/logout", auth, async (req, res) => {
+  app2.post("/api/auth/logout", auth, async (req, res) => {
     await db("sessions").where({ id: hash(req.cookies.helm_session) }).delete();
     res.clearCookie("helm_session", { path: "/" });
     res.json({ ok: true });
   });
-  app.post("/api/auth/accept-invite", async (req, res) => {
+  app2.post("/api/auth/accept-invite", async (req, res) => {
     await rateLimit(`invite:${req.ip}`, 15, 15);
     const d = z.object({ token: z.string().length(64), name: z.string().trim().min(2).max(100), password: z.string().min(12).max(256) }).parse(req.body);
     let uid = "";
@@ -622,7 +622,7 @@ function createApp() {
     res.json({ ok: true });
   });
   const guestUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
-  app.post("/api/guest/upload", guestUpload.single("file"), async (req, res) => {
+  app2.post("/api/guest/upload", guestUpload.single("file"), async (req, res) => {
     if (!req.file) throw fail(400, "Choose a screenshot.");
     let guestUser = await db("users").where({ email: "guest@helm.local" }).first();
     if (!guestUser) {
@@ -646,7 +646,7 @@ function createApp() {
     }
     res.status(201).json({ id, name: req.file.originalname, size: bytes.length });
   });
-  app.get("/api/guest/attachments/:id", async (req, res) => {
+  app2.get("/api/guest/attachments/:id", async (req, res) => {
     const a = await db("attachments").where({ id: req.params.id }).first();
     if (!a) throw fail(404, "Screenshot not found.");
     res.setHeader("Content-Type", a.mime || "image/png");
@@ -659,7 +659,7 @@ function createApp() {
     if (f.file) return res.sendFile(f.file);
     throw fail(404, "Screenshot file missing.");
   });
-  app.post("/api/guest/submit", async (req, res) => {
+  app2.post("/api/guest/submit", async (req, res) => {
     await rateLimit("guest:" + req.ip, 20, 60);
     const d = z.object({
       reporter_name: z.string().trim().min(2).max(100),
@@ -732,11 +732,11 @@ function createApp() {
     });
     res.status(201).json(saved);
   });
-  app.get("/api/guest/projects", async (req, res) => {
+  app2.get("/api/guest/projects", async (req, res) => {
     const list = await db("projects").where({ active: true }).select("id", "name", "description");
     res.json(list);
   });
-  app.get("/api/guest/issues", async (req, res) => {
+  app2.get("/api/guest/issues", async (req, res) => {
     const rows = await db("issues").join("users", "users.id", "issues.reporter_id").join("projects", "projects.id", "issues.project_id").where("users.email", "guest@helm.local").whereNot("issues.archived", true).select("issues.id", "issues.reference", "issues.type", "issues.title", "issues.description", "issues.expected", "issues.status", "issues.severity", "issues.created_at", "issues.assigned_to", "issues.assigned_role", "issues.device", "users.name as reporter_name", "projects.name as project_name", "projects.id as project_id").orderBy("issues.created_at", "desc").limit(200);
     const withFiles = await Promise.all(rows.map(async (i) => {
       const attachments = await db("attachments").where({ issue_id: i.id }).select("id", "name", "mime", "size");
@@ -744,7 +744,7 @@ function createApp() {
     }));
     res.json(withFiles);
   });
-  app.get("/api/guest/issues/:id/log", async (req, res) => {
+  app2.get("/api/guest/issues/:id/log", async (req, res) => {
     const guestUser = await db("users").where({ email: "guest@helm.local" }).first();
     if (!guestUser) return res.json([]);
     const issue = await db("issues").where({ id: req.params.id, reporter_id: guestUser.id }).first();
@@ -752,7 +752,7 @@ function createApp() {
     const log = await db("activity").where({ issue_id: issue.id }).orderBy("created_at", "asc");
     res.json(log);
   });
-  app.patch("/api/guest/issues/:id", async (req, res) => {
+  app2.patch("/api/guest/issues/:id", async (req, res) => {
     const d = z.object({
       actor_name: z.string().trim().min(1).max(100),
       actor_role: z.enum(["tester", "developer"]),
@@ -780,14 +780,14 @@ function createApp() {
     });
     res.json({ ok: true });
   });
-  app.use("/api", (req, res, next) => req.path.startsWith("/integration/") ? next() : auth(req, res, next));
-  app.get("/api/projects", async (req, res) => {
+  app2.use("/api", (req, res, next) => req.path.startsWith("/integration/") ? next() : auth(req, res, next));
+  app2.get("/api/projects", async (req, res) => {
     const u = req.user;
     let query = db("projects").where({ "projects.active": true });
     if (u.role !== "admin") query = query.join("memberships", "projects.id", "memberships.project_id").where("memberships.user_id", u.id);
     res.json(await query.select("projects.*"));
   });
-  app.get("/api/issues", async (req, res) => {
+  app2.get("/api/issues", async (req, res) => {
     const u = req.user;
     const page = Math.max(1, Math.min(1e5, Number(req.query.page) || 1));
     let q = db("issues").join("projects", "projects.id", "issues.project_id").join("users", "users.id", "issues.reporter_id").where("issues.archived", req.query.archived === "true");
@@ -807,7 +807,7 @@ function createApp() {
     const rows = await q.select("issues.*", "projects.name as project_name", "users.name as reporter_name").orderBy("issues.created_at", sort).limit(25).offset((page - 1) * 25);
     res.json({ issues: rows, total: Number(count?.total || 0), page });
   });
-  app.get("/api/stats", async (req, res) => {
+  app2.get("/api/stats", async (req, res) => {
     const u = req.user;
     let q = db("issues").where({ archived: false });
     if (u.role !== "admin") q = q.where("reporter_id", u.id);
@@ -815,7 +815,7 @@ function createApp() {
     const counts = Object.fromEntries(statuses.map((s) => [s, rows.filter((i) => i.status === s).length]));
     res.json({ counts, total: rows.length, open: rows.filter((i) => !["Closed", "Duplicate"].includes(i.status)).length, critical: rows.filter((i) => ["High", "Critical"].includes(i.severity) && !["Closed", "Duplicate"].includes(i.status)).length, aging: rows.filter((i) => !["Closed", "Duplicate"].includes(i.status) && Date.now() - Date.parse(i.created_at) > 7 * 864e5).length, failed: u.role === "admin" ? Number((await db("deliveries").whereIn("state", ["failed", "uncertain"]).count({ n: "id" }).first())?.n) : 0 });
   });
-  app.post("/api/issues", async (req, res) => {
+  app2.post("/api/issues", async (req, res) => {
     const u = req.user;
     await rateLimit(`submit:${u.id}`, 30, 60);
     const d = issueInput.parse(req.body);
@@ -849,7 +849,7 @@ Thanks for helping improve ${p.name}. Your report has been saved with reference 
     }
     res.status(201).json(saved);
   });
-  app.get("/api/issues/:id", async (req, res) => {
+  app2.get("/api/issues/:id", async (req, res) => {
     const u = req.user;
     const i = await accessible(db, u, String(req.params.id));
     const [reporter, project, comments, history, attachments, approval] = await Promise.all([db("users").where({ id: i.reporter_id }).first(), db("projects").where({ id: i.project_id }).first(), db("comments").join("users", "users.id", "comments.user_id").where("issue_id", i.id).modify((q) => {
@@ -860,7 +860,7 @@ Thanks for helping improve ${p.name}. Your report has been saved with reference 
     const notifications = u.role === "admin" ? await db("deliveries").join("events", "events.id", "deliveries.event_id").where("events.issue_id", i.id).select("deliveries.id", "deliveries.recipient", "deliveries.state", "deliveries.error", "deliveries.attempts", "deliveries.created_at", "events.kind") : [];
     res.json({ ...i, reporter: publicUser(reporter), project, comments, history, attachments, approval, notifications });
   });
-  app.post("/api/issues/:id/action", async (req, res) => {
+  app2.post("/api/issues/:id/action", async (req, res) => {
     const u = req.user;
     const d = z.object({ action: z.enum(["approve", "verify", "reopen", "status", "information", "update", "archive"]), version: z.number().int().positive(), summary: text, note: text, build: z.string().max(100).default(""), test_url: url, status: z.enum(statuses).optional(), priority: z.enum(["Low", "Medium", "High", "Urgent"]).optional(), severity: z.enum(["Low", "Medium", "High", "Critical"]).optional(), category: z.string().max(80).optional(), type: z.enum(["Bug", "Improvement"]).optional(), assignee_id: z.uuid().nullable().optional(), duplicate_of: z.uuid().nullable().optional(), attachments: z.array(z.uuid()).max(5).default([]) }).parse(req.body);
     await db.transaction(async (q) => {
@@ -940,7 +940,7 @@ Please open the issue and choose \u201CVerified \u2014 fixed\u201D if it works, 
     });
     res.json({ ok: true });
   });
-  app.post("/api/issues/:id/attachments", async (req, res) => {
+  app2.post("/api/issues/:id/attachments", async (req, res) => {
     const u = req.user;
     const d = z.object({ attachments: z.array(z.uuid()).min(1).max(5) }).parse(req.body);
     await db.transaction(async (q) => {
@@ -950,7 +950,7 @@ Please open the issue and choose \u201CVerified \u2014 fixed\u201D if it works, 
     });
     res.json({ ok: true });
   });
-  app.post("/api/issues/:id/comments", async (req, res) => {
+  app2.post("/api/issues/:id/comments", async (req, res) => {
     const u = req.user;
     await rateLimit(`comment:${u.id}`, 60, 60);
     const d = z.object({ body: z.string().trim().min(1).max(15e3), internal: z.boolean().default(false) }).parse(req.body);
@@ -967,7 +967,7 @@ ${d.body}` });
     res.status(201).json({ ok: true });
   });
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
-  app.post("/api/uploads", async (req, res, next) => {
+  app2.post("/api/uploads", async (req, res, next) => {
     try {
       await rateLimit(`upload:${req.user.id}`, 50, 60);
       next();
@@ -990,14 +990,14 @@ ${d.body}` });
     }
     res.status(201).json({ id, name: req.file.originalname, size: bytes.length });
   });
-  app.delete("/api/uploads/:id", async (req, res) => {
+  app2.delete("/api/uploads/:id", async (req, res) => {
     const a = await db("attachments").where({ id: req.params.id, user_id: req.user.id }).whereNull("issue_id").first();
     if (!a) throw fail(404, "Upload not found.");
     await remove(a.storage_key);
     await db("attachments").where({ id: a.id }).delete();
     res.json({ ok: true });
   });
-  app.get("/api/attachments/:id/link", async (req, res) => {
+  app2.get("/api/attachments/:id/link", async (req, res) => {
     const u = req.user;
     const a = await db("attachments").where({ id: req.params.id }).first();
     if (!a) throw fail(404, "Screenshot not found.");
@@ -1006,7 +1006,7 @@ ${d.body}` });
     const expiry = Date.now() + 6e4;
     res.json({ url: `/api/attachments/${a.id}/file?expires=${expiry}&signature=${signDownload(a.id, u.id, expiry)}` });
   });
-  app.get("/api/attachments/:id/file", async (req, res) => {
+  app2.get("/api/attachments/:id/file", async (req, res) => {
     const u = req.user;
     const id = String(req.params.id), expires = Number(req.query.expires), signature = String(req.query.signature || "");
     const expected = signDownload(id, u.id, expires);
@@ -1021,11 +1021,11 @@ ${d.body}` });
     if (f.url) res.redirect(f.url);
     else res.sendFile(f.file);
   });
-  app.get("/api/admin/settings", admin, async (req, res) => {
+  app2.get("/api/admin/settings", admin, async (req, res) => {
     const settings = await db("settings").where({ id: 1 }).first();
     res.json({ ...settings, recipients: JSON.parse(settings.recipients), users: (await db("users").orderBy("name")).map(publicUser), projects: await db("projects"), memberships: await db("memberships"), health: { database: process.env.DATABASE_URL ? "PostgreSQL" : "Local SQLite", storage: process.env.S3_ENDPOINT ? "Private S3" : "Private local storage", n8n: !!process.env.N8N_WEBHOOK_URL, sender: process.env.EMAIL_FROM || null, mode: production ? "production" : "local" } });
   });
-  app.patch("/api/admin/settings", admin, async (req, res) => {
+  app2.patch("/api/admin/settings", admin, async (req, res) => {
     const d = z.object({ reminder_hours: z.number().int().min(1).max(720), digest_enabled: z.boolean(), timezone: z.string().refine((s) => {
       try {
         new Intl.DateTimeFormat("en", { timeZone: s });
@@ -1040,7 +1040,7 @@ ${d.body}` });
     });
     res.json({ ok: true });
   });
-  app.post("/api/admin/projects", admin, async (req, res) => {
+  app2.post("/api/admin/projects", admin, async (req, res) => {
     const d = z.object({ name: z.string().trim().min(2).max(80), description: z.string().max(500).default("") }).parse(req.body);
     const id = randomUUID3();
     await db.transaction(async (q) => {
@@ -1049,7 +1049,7 @@ ${d.body}` });
     });
     res.status(201).json({ id });
   });
-  app.post("/api/admin/invites", admin, async (req, res) => {
+  app2.post("/api/admin/invites", admin, async (req, res) => {
     const d = z.object({ email: z.email().max(254), name: z.string().trim().min(2).max(100), projects: z.array(z.uuid()).min(1).max(50) }).parse(req.body);
     const raw = token();
     let uid = "";
@@ -1069,7 +1069,7 @@ You have been invited to help test and improve our projects. Set up your account
     });
     res.status(201).json({ ok: true, ...!production ? { local_invite_url: `${appURL()}/?invite=${raw}` } : {} });
   });
-  app.patch("/api/admin/users/:id", admin, async (req, res) => {
+  app2.patch("/api/admin/users/:id", admin, async (req, res) => {
     const d = z.object({ active: z.boolean(), projects: z.array(z.uuid()).max(50) }).parse(req.body);
     const uid = String(req.params.id);
     if (uid === req.user.id) throw fail(400, "You cannot deactivate your own account.");
@@ -1085,8 +1085,8 @@ You have been invited to help test and improve our projects. Set up your account
     });
     res.json({ ok: true });
   });
-  app.get("/api/admin/notifications", admin, async (req, res) => res.json(await db("deliveries").select("id", "recipient", "subject", "state", "attempts", "error", "created_at").orderBy("created_at", "desc").limit(100)));
-  app.post("/api/admin/notifications/:id/retry", admin, async (req, res) => {
+  app2.get("/api/admin/notifications", admin, async (req, res) => res.json(await db("deliveries").select("id", "recipient", "subject", "state", "attempts", "error", "created_at").orderBy("created_at", "desc").limit(100)));
+  app2.post("/api/admin/notifications/:id/retry", admin, async (req, res) => {
     const d = await db("deliveries").where({ id: req.params.id }).first();
     if (!d || !["failed", "uncertain"].includes(d.state)) throw fail(409, "This notification is not retryable.");
     if (d.first_claim_at && Date.now() - Date.parse(d.first_claim_at) > 23 * 36e5) throw fail(409, "Provider deduplication window expired. Check the provider\u2019s records before manually resending; automatic retry is blocked.");
@@ -1096,7 +1096,7 @@ You have been invited to help test and improve our projects. Set up your account
     });
     res.json({ ok: true });
   });
-  app.post("/api/integration/schedule", async (req, res) => {
+  app2.post("/api/integration/schedule", async (req, res) => {
     const secret = process.env.N8N_SCHEDULER_SECRET || "", received = req.get("authorization")?.replace(/^Bearer /, "") || "";
     if (secret.length < 32 || received.length !== secret.length || !timingSafeEqual2(Buffer.from(secret), Buffer.from(received))) throw fail(401, "Invalid scheduler authorization.");
     const d = z.object({ timestamp: z.number(), nonce: z.string().min(1).max(200) }).parse(req.body);
@@ -1107,7 +1107,7 @@ You have been invited to help test and improve our projects. Set up your account
     await schedule();
     res.json({ ok: true });
   });
-  app.use("/api/integration", async (req, res, next) => {
+  app2.use("/api/integration", async (req, res, next) => {
     try {
       await rateLimit(`integration:${req.ip}`, 300, 1);
       const bearer = req.get("authorization")?.replace(/^Bearer /, "");
@@ -1120,7 +1120,7 @@ You have been invited to help test and improve our projects. Set up your account
       next(e);
     }
   });
-  app.post("/api/integration/claim", async (req, res) => {
+  app2.post("/api/integration/claim", async (req, res) => {
     const d = req.delivery;
     let output = { send: false };
     await db.transaction(async (q) => {
@@ -1142,7 +1142,7 @@ You have been invited to help test and improve our projects. Set up your account
     });
     res.json(output);
   });
-  app.post("/api/integration/outcome", async (req, res) => {
+  app2.post("/api/integration/outcome", async (req, res) => {
     const d = req.delivery;
     const data = z.object({ state: z.enum(["provider-accepted", "failed", "uncertain"]), provider_id: z.string().max(200).optional(), execution_id: z.string().max(200).default(""), error: z.enum(["provider_rejected", "provider_unavailable", "unknown_outcome"]).optional() }).parse(req.body);
     if (data.state === "provider-accepted" && !data.provider_id) throw fail(400, "Provider message ID required.");
@@ -1155,48 +1155,25 @@ You have been invited to help test and improve our projects. Set up your account
     });
     res.json({ ok: true });
   });
-  app.use("/api", (req, res) => res.status(404).json({ error: "Endpoint not found." }));
-  app.use(express.static(path3.resolve("dist")));
-  app.get("/{*path}", (req, res) => res.sendFile(path3.resolve("dist/index.html")));
-  app.use((err, req, res, next) => {
+  app2.use("/api", (req, res) => res.status(404).json({ error: "Endpoint not found." }));
+  app2.use(express.static(path3.resolve("dist")));
+  app2.get("/{*path}", (req, res) => res.sendFile(path3.resolve("dist/index.html")));
+  app2.use((err, req, res, next) => {
     if (err instanceof z.ZodError) return res.status(400).json({ error: err.issues.map((x) => `${x.path.join(".")}: ${x.message}`).join("; ") });
     if (err instanceof multer.MulterError) return res.status(400).json({ error: "Upload failed. Maximum file size is 10 MB." });
     if (err.code === "23505" || err.code === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: "That record already exists." });
     res.status(err.status || 500).json({ error: err.status ? err.message : "Something went wrong. Please try again." });
     if (!err.status) console.error("Request failed:", err.name, err.code || "internal_error");
   });
-  return app;
+  return app2;
 }
 
 // api/index.ts
-var appInstance;
-var migratePromise = null;
-async function getApp() {
-  if (!migratePromise) {
-    migratePromise = migrate().catch((err) => {
-      console.error("[Vercel Serverless] Auto-migration error:", err);
-    });
-  }
-  await migratePromise;
-  if (!appInstance) {
-    appInstance = createApp();
-  }
-  return appInstance;
-}
-async function handler(req, res) {
-  try {
-    const app = await getApp();
-    return app(req, res);
-  } catch (err) {
-    console.error("[Vercel Serverless] Handler error:", err);
-    res.status(500).json({
-      error: "Vercel Serverless Function Error",
-      message: err?.message || String(err),
-      hasDatabaseUrl: !!process.env.DATABASE_URL,
-      isVercel: !!process.env.VERCEL
-    });
-  }
-}
+migrate().catch((err) => {
+  console.warn("[Vercel Serverless] Auto-migration notice:", err?.message || err);
+});
+var app = createApp();
+var index_default = app;
 export {
-  handler as default
+  index_default as default
 };
