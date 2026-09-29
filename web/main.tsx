@@ -5,7 +5,8 @@ import {
   AlertCircle, CheckCircle2, RefreshCw, Paperclip, X, Upload,
   Image as ImageIcon, Loader2, ChevronDown, ChevronRight, ChevronLeft,
   Bug, Lightbulb, HelpCircle, UserCheck, Clock, ArrowUpRight, Users, LayoutList,
-  Kanban, ArrowRight, ArrowLeft, ExternalLink, Check, Sparkles
+  Kanban, ArrowRight, ArrowLeft, ExternalLink, Check, Sparkles,
+  Mic, MicOff, Square, Volume2, Trash2, Edit3, CheckSquare
 } from 'lucide-react';
 import '@fontsource/dm-sans/400.css';
 import '@fontsource/dm-sans/500.css';
@@ -30,6 +31,10 @@ type Issue = {
   status: string; created_at: string; device: string;
   assigned_to: string; assigned_role: string;
   project_name?: string; project_id?: string;
+  debugger_status?: 'none' | 'passed' | 'failed';
+  tester_status?: 'none' | 'passed' | 'failed';
+  debug_reason?: string;
+  voice_attachment_id?: string;
   attachments: { id: string; name: string }[];
 };
 
@@ -139,6 +144,25 @@ function App() {
   const [selectedProject, setSelectedProject] = useState<string>('all');
   const [workspaceOpen, setWorkspaceOpen]     = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
+
+  // Debugger & Tester Filters
+  const [filterDebugger, setFilterDebugger] = useState<'all'|'passed'|'failed'|'none'>('all');
+  const [filterTester, setFilterTester]     = useState<'all'|'passed'|'failed'|'none'>('all');
+
+  // Inline reason edit
+  const [editingReasonId, setEditingReasonId] = useState<string|null>(null);
+  const [editingReasonText, setEditingReasonText] = useState('');
+
+  // Voice recording state
+  const [isRecording, setIsRecording]           = useState(false);
+  const [recordSec, setRecordSec]               = useState(0);
+  const [voiceBlob, setVoiceBlob]               = useState<Blob | null>(null);
+  const [voiceUrl, setVoiceUrl]                 = useState<string | null>(null);
+  const [voiceAttachment, setVoiceAttachment]   = useState<Attachment | null>(null);
+  const [voiceUploading, setVoiceUploading]     = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<any>(null);
 
   // Jira Issue Detail Drawer
   const [selectedIssueId, setSelectedIssueId] = useState<string|null>(null);
@@ -256,12 +280,116 @@ function App() {
     return true;
   }).filter(i => {
     if (filterStatus && i.status !== filterStatus) return false;
+    if (filterDebugger !== 'all') {
+      const ds = i.debugger_status || 'none';
+      if (ds !== filterDebugger) return false;
+    }
+    if (filterTester !== 'all') {
+      const ts = i.tester_status || 'none';
+      if (ts !== filterTester) return false;
+    }
     if (search) {
       const q = search.toLowerCase();
-      return i.description.toLowerCase().includes(q) || i.reference?.toLowerCase().includes(q) || reporter(i.device).toLowerCase().includes(q);
+      return i.description.toLowerCase().includes(q) || i.reference?.toLowerCase().includes(q) || reporter(i.device).toLowerCase().includes(q) || (i.debug_reason && i.debug_reason.toLowerCase().includes(q));
     }
     return true;
   });
+
+  // ── Voice Recording Helpers ───────────────────────────────────────────────
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        const mimeType = mediaRecorder.mimeType || 'audio/webm';
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
+        setVoiceBlob(blob);
+        const url = URL.createObjectURL(blob);
+        setVoiceUrl(url);
+        stream.getTracks().forEach(t => t.stop());
+
+        // Auto upload voice note
+        setVoiceUploading(true);
+        try {
+          const f = new FormData();
+          const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm';
+          f.append('file', blob, `voice-note-${Date.now()}.${ext}`);
+          const saved = await api('/guest/upload', {
+            method: 'POST',
+            body: f
+          });
+          setVoiceAttachment(saved);
+          notify('Voice note recorded & ready.');
+        } catch (err: any) {
+          setAddErr('Voice upload failed: ' + err.message);
+        } finally {
+          setVoiceUploading(false);
+        }
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setRecordSec(0);
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => {
+        setRecordSec(s => s + 1);
+      }, 1000);
+    } catch (err: any) {
+      setAddErr('Microphone access denied or not supported in this browser.');
+    }
+  }, [notify]);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+  }, [isRecording]);
+
+  const cancelVoice = useCallback(() => {
+    if (isRecording) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      setIsRecording(false);
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    if (voiceUrl) URL.revokeObjectURL(voiceUrl);
+    setVoiceBlob(null);
+    setVoiceUrl(null);
+    setVoiceAttachment(null);
+    setRecordSec(0);
+  }, [isRecording, voiceUrl]);
+
+  // ── Debugger & Tester Checklist Actions ────────────────────────────────────
+  async function updateChecklist(issueId: string, updates: { debugger_status?: 'none'|'passed'|'failed'; tester_status?: 'none'|'passed'|'failed'; debug_reason?: string }) {
+    setIssues(prev => prev.map(item => item.id === issueId ? { ...item, ...updates } : item));
+    try {
+      await api(`/guest/issues/${issueId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          actor_name: updates.tester_status ? 'Tester' : 'Debugger',
+          actor_role: updates.tester_status ? 'tester' : 'developer',
+          ...updates
+        })
+      });
+      if (selectedIssueId === issueId) {
+        const e = await api(`/guest/issues/${issueId}/log`);
+        setLogs(l => ({ ...l, [issueId]: e }));
+      }
+    } catch (e: any) {
+      notify(`Failed to update checklist: ${e.message}`);
+      await load();
+    }
+  }
 
   // ── Quick Status Transition ───────────────────────────────────────────────
   async function updateStatus(issueId: string, newStatus: string) {
@@ -318,7 +446,7 @@ function App() {
   const uploadFile = useCallback(async (fileList: FileList | null) => {
     if (!fileList) return;
     const incoming = Array.from(fileList);
-    if (files.length + incoming.length > 5) { setAddErr('Maximum 5 screenshots.'); return; }
+    if (files.length + incoming.length > 25) { setAddErr('Maximum 25 photos.'); return; }
     setAddErr(''); setUploading(true);
     const done = [...files];
     for (const file of incoming) {
@@ -352,6 +480,10 @@ function App() {
   // ── Submit ────────────────────────────────────────────────────────────────
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (!form.issue.trim() && !voiceAttachment && files.length === 0) {
+      setAddErr('Please enter what the issue is, record a voice note, or attach screenshots.');
+      return;
+    }
     setAddBusy(true); setAddErr('');
     try {
       await api('/guest/submit', { method:'POST', body: JSON.stringify({
@@ -360,10 +492,14 @@ function App() {
         issue: form.issue, expected: form.expected,
         assigned_to: form.assignedTo, assigned_role: form.assignedTo ? form.assignedRole : '',
         project_id: form.projectId || (selectedProject !== 'all' ? selectedProject : undefined),
-        attachments: files.map(f => f.id), idempotency_key: idempKey,
+        attachments: files.map(f => f.id),
+        voice_attachment_id: voiceAttachment ? voiceAttachment.id : '',
+        idempotency_key: idempKey,
       })});
       files.forEach(f => { if (f.preview) URL.revokeObjectURL(f.preview); });
-      setFiles([]); setForm(f => ({ ...f, issue:'', expected:'', assignedTo:'' }));
+      setFiles([]);
+      cancelVoice();
+      setForm(f => ({ ...f, issue:'', expected:'', assignedTo:'' }));
       setIdempKey(crypto.randomUUID());
       setShowModal(false);
       notify(form.type === 'Question' ? 'Question posted successfully.' : form.type === 'Improvement' ? 'Improvement suggested successfully.' : 'Issue reported successfully.');
@@ -757,14 +893,28 @@ function App() {
                 {STATUSES.map(s => <option key={s}>{s}</option>)}
               </select>
 
+              <select value={filterDebugger} onChange={e => setFilterDebugger(e.target.value as any)} style={{ width: 'auto' }}>
+                <option value="all">Debugger: All</option>
+                <option value="passed">Debugger: ✓ Fixed</option>
+                <option value="failed">Debugger: ✗ Not Fixed</option>
+                <option value="none">Debugger: ⏳ Pending</option>
+              </select>
+
+              <select value={filterTester} onChange={e => setFilterTester(e.target.value as any)} style={{ width: 'auto' }}>
+                <option value="all">Tester: All</option>
+                <option value="passed">Tester: ✓ Verified</option>
+                <option value="failed">Tester: ✗ Retest Failed</option>
+                <option value="none">Tester: ⏳ Pending</option>
+              </select>
+
               <button className={`filter-button ${showFilters ? 'selected' : ''}`} onClick={() => setShowFilters(!showFilters)}>
                 <SlidersHorizontal size={13} /> Quick filters
               </button>
 
-              {search || filterStatus || filterRole !== 'all' ? (
+              {search || filterStatus || filterDebugger !== 'all' || filterTester !== 'all' || filterRole !== 'all' ? (
                 <button
                   type="button"
-                  onClick={() => { setSearch(''); setFilterStatus(''); setFilterRole('all'); }}
+                  onClick={() => { setSearch(''); setFilterStatus(''); setFilterRole('all'); setFilterDebugger('all'); setFilterTester('all'); }}
                   style={{ background: 'transparent', border: 'none', color: '#638355', fontSize: 11, cursor: 'pointer', textDecoration: 'underline' }}
                 >
                   Clear filters
@@ -901,121 +1051,289 @@ function App() {
                               </div>
 
                               {/* Footer: Quick status, attachments, avatar */}
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: 8, borderTop: '1px solid #f1f5f9' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                  {row.attachments?.length > 0 && (
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#64748b', background: '#f1f5f9', padding: '2px 5px', borderRadius: 3 }}>
-                                      <Paperclip size={10} />{row.attachments.length}
+                               {/* Footer: Quick status, attachments, voice, checklist, avatar */}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 8, borderTop: '1px solid #f1f5f9' }}>
+                                  {/* Badges row: files, voice, checklist indicators */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                    {row.attachments?.length > 0 && (
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#64748b', background: '#f1f5f9', padding: '2px 5px', borderRadius: 3 }}>
+                                        <Paperclip size={10} />{row.attachments.length}
+                                      </span>
+                                    )}
+                                    {row.voice_attachment_id && (
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#7c3aed', background: '#ede9fe', padding: '2px 5px', borderRadius: 3, fontWeight: 600 }}>
+                                        <Volume2 size={10} />Voice
+                                      </span>
+                                    )}
+                                    {row.debugger_status === 'passed' && (
+                                      <span title="Debugger: Fixed" style={{ fontSize: 9, fontWeight: 700, color: '#15803d', background: '#dcfce7', padding: '1px 5px', borderRadius: 3 }}>
+                                        Dev: ✓
+                                      </span>
+                                    )}
+                                    {row.debugger_status === 'failed' && (
+                                      <span title="Debugger: Not Fixed" style={{ fontSize: 9, fontWeight: 700, color: '#b91c1c', background: '#fee2e2', padding: '1px 5px', borderRadius: 3 }}>
+                                        Dev: ✗
+                                      </span>
+                                    )}
+                                    {row.tester_status === 'passed' && (
+                                      <span title="Tester: Verified" style={{ fontSize: 9, fontWeight: 700, color: '#15803d', background: '#dcfce7', padding: '1px 5px', borderRadius: 3 }}>
+                                        Test: ✓
+                                      </span>
+                                    )}
+                                    {row.tester_status === 'failed' && (
+                                      <span title="Tester: Retest Failed" style={{ fontSize: 9, fontWeight: 700, color: '#b91c1c', background: '#fee2e2', padding: '1px 5px', borderRadius: 3 }}>
+                                        Test: ✗
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <span style={{ fontSize: 9, color: '#94a3b8' }}>
+                                      {fmt(row.created_at)}
                                     </span>
-                                  )}
-                                  <span style={{ fontSize: 9, color: '#94a3b8' }}>
-                                    {fmt(row.created_at)}
-                                  </span>
-                                </div>
 
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                  {/* Quick Column Advance */}
-                                  <select
-                                    value={row.status}
-                                    onClick={e => e.stopPropagation()}
-                                    onChange={e => { e.stopPropagation(); updateStatus(row.id, e.target.value); }}
-                                    style={{
-                                      fontSize: 9,
-                                      padding: '2px 4px',
-                                      width: 'auto',
-                                      borderRadius: 4,
-                                      background: '#f8fafc',
-                                      border: '1px solid #cbd5e1',
-                                      color: '#475569',
-                                      cursor: 'pointer'
-                                    }}
-                                  >
-                                    {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                                  </select>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                      {/* Quick Column Advance */}
+                                      <select
+                                        value={row.status}
+                                        onClick={e => e.stopPropagation()}
+                                        onChange={e => { e.stopPropagation(); updateStatus(row.id, e.target.value); }}
+                                        style={{
+                                          fontSize: 9,
+                                          padding: '2px 4px',
+                                          width: 'auto',
+                                          borderRadius: 4,
+                                          background: '#f8fafc',
+                                          border: '1px solid #cbd5e1',
+                                          color: '#475569',
+                                          cursor: 'pointer'
+                                        }}
+                                      >
+                                        {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                                      </select>
 
-                                  <UserAvatar name={row.assigned_to} role={row.assigned_role} size={22} />
+                                      <UserAvatar name={row.assigned_to} role={row.assigned_role} size={22} />
+                                    </div>
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-
-              /* ── SPREADSHEET LIST VIEW ── */
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{activeTab === 'issues' ? 'Issue' : activeTab === 'improvements' ? 'Improvement' : 'Question'}</th>
-                      <th>{activeTab === 'issues' ? 'Reporter' : activeTab === 'improvements' ? 'Suggested By' : 'Asked By'}</th>
-                      <th>Assigned To</th>
-                      <th>Status</th>
-                      <th>Files</th>
-                      <th>Date</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.map(row => (
-                      <tr
-                        key={row.id}
-                        onClick={() => setSelectedIssueId(row.id)}
-                        style={{ cursor: 'pointer', background: selectedIssueId === row.id ? '#f7f9f2' : undefined }}
-                      >
-                        <td>
-                          <div className="issue-title-cell">
-                            <span className={`type-icon ${row.type === 'Improvement' ? 'idea' : row.type === 'Question' ? 'question' : 'bug'}`} style={row.type === 'Question' ? { background: '#ede9fe', color: '#7c3aed' } : undefined}>
-                              {row.type === 'Improvement' ? <Lightbulb size={15} /> : row.type === 'Question' ? <HelpCircle size={15} /> : <Bug size={15} />}
-                            </span>
-                            <div>
-                              <div className="issue-link" style={{ fontWeight: 600 }}>{row.description.slice(0, 80)}{row.description.length > 80 ? '…' : ''}</div>
-                              <div className="issue-meta">
-                                <span style={{ fontFamily:'monospace', fontSize:9 }}>{row.reference}</span>
-                                {row.project_name && <span style={{ color:'#56704e', fontWeight:600, background:'#eef4e6', padding:'1px 5px', borderRadius:3, fontSize:9 }}>{row.project_name}</span>}
-                                <span>·</span>
-                                <span>{row.type === 'Question' ? 'Context: ' : row.type === 'Improvement' ? 'Outcome: ' : 'Expected: '}{row.expected.slice(0, 50)}{row.expected.length > 50 ? '…' : ''}</span>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                        <td>
-                          <div style={{ fontWeight:500, fontSize:11 }}>{reporter(row.device)}</div>
-                          <RoleTag role={repRole(row.device)} />
-                        </td>
-                        <td>
-                          {row.assigned_to ? (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <UserAvatar name={row.assigned_to} role={row.assigned_role} size={20} />
-                              <div>
-                                <div style={{ fontWeight:500, fontSize:11 }}>{row.assigned_to}</div>
-                                <RoleTag role={row.assigned_role} />
-                              </div>
-                            </div>
-                          ) : (
-                            <span style={{ color:'#c8d2be', fontSize:10 }}>Unassigned</span>
+                            ))
                           )}
-                        </td>
-                        <td><Badge status={row.status} /></td>
-                        <td>
-                          {row.attachments.length > 0
-                            ? <span className="badge" style={{ gap:5 }}><ImageIcon size={10} />{row.attachments.length}</span>
-                            : <span style={{ color:'#d4dbc9' }}>—</span>}
-                        </td>
-                        <td className="date-cell">{fmt(row.created_at)}</td>
-                        <td>
-                          <ChevronRight size={15} color="#94a3b8" />
-                        </td>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+
+                /* ── SPREADSHEET LIST VIEW ── */
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{activeTab === 'issues' ? 'Issue' : activeTab === 'improvements' ? 'Improvement' : 'Question'}</th>
+                        <th>{activeTab === 'issues' ? 'Reporter' : activeTab === 'improvements' ? 'Suggested By' : 'Asked By'}</th>
+                        <th>Assigned To</th>
+                        <th>Status</th>
+                        <th>Files & Audio</th>
+                        <th style={{ textAlign: 'center' }}>Debugger</th>
+                        <th style={{ textAlign: 'center' }}>Tester</th>
+                        <th>Reason (if didn't work)</th>
+                        <th>Date</th>
+                        <th />
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                    </thead>
+                    <tbody>
+                      {filtered.map(row => (
+                        <tr
+                          key={row.id}
+                          onClick={() => setSelectedIssueId(row.id)}
+                          style={{ cursor: 'pointer', background: selectedIssueId === row.id ? '#f7f9f2' : undefined }}
+                        >
+                          <td>
+                            <div className="issue-title-cell">
+                              <span className={`type-icon ${row.type === 'Improvement' ? 'idea' : row.type === 'Question' ? 'question' : 'bug'}`} style={row.type === 'Question' ? { background: '#ede9fe', color: '#7c3aed' } : undefined}>
+                                {row.type === 'Improvement' ? <Lightbulb size={15} /> : row.type === 'Question' ? <HelpCircle size={15} /> : <Bug size={15} />}
+                              </span>
+                              <div>
+                                <div className="issue-link" style={{ fontWeight: 600 }}>{row.description.slice(0, 80)}{row.description.length > 80 ? '…' : ''}</div>
+                                <div className="issue-meta">
+                                  <span style={{ fontFamily:'monospace', fontSize:9 }}>{row.reference}</span>
+                                  {row.project_name && <span style={{ color:'#56704e', fontWeight:600, background:'#eef4e6', padding:'1px 5px', borderRadius:3, fontSize:9 }}>{row.project_name}</span>}
+                                  <span>·</span>
+                                  <span>{row.type === 'Question' ? 'Context: ' : row.type === 'Improvement' ? 'Outcome: ' : 'Expected: '}{row.expected.slice(0, 50)}{row.expected.length > 50 ? '…' : ''}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ fontWeight:500, fontSize:11 }}>{reporter(row.device)}</div>
+                            <RoleTag role={repRole(row.device)} />
+                          </td>
+                          <td>
+                            {row.assigned_to ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <UserAvatar name={row.assigned_to} role={row.assigned_role} size={20} />
+                                <div>
+                                  <div style={{ fontWeight:500, fontSize:11 }}>{row.assigned_to}</div>
+                                  <RoleTag role={row.assigned_role} />
+                                </div>
+                              </div>
+                            ) : (
+                              <span style={{ color:'#c8d2be', fontSize:10 }}>Unassigned</span>
+                            )}
+                          </td>
+                          <td><Badge status={row.status} /></td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              {row.attachments.length > 0 && (
+                                <span className="badge" style={{ gap: 4 }} title={`${row.attachments.length} photo(s)`}>
+                                  <ImageIcon size={10} />{row.attachments.length}
+                                </span>
+                              )}
+                              {row.voice_attachment_id && (
+                                <span
+                                  className="badge"
+                                  style={{ gap: 4, background: '#ede9fe', color: '#6d28d9', cursor: 'pointer' }}
+                                  title="Voice recording attached — click to open & listen"
+                                  onClick={e => { e.stopPropagation(); setSelectedIssueId(row.id); }}
+                                >
+                                  <Volume2 size={10} /> Voice
+                                </span>
+                              )}
+                              {row.attachments.length === 0 && !row.voice_attachment_id && (
+                                <span style={{ color: '#d4dbc9' }}>—</span>
+                              )}
+                            </div>
+                          </td>
+                          <td onClick={e => e.stopPropagation()} style={{ textAlign: 'center' }}>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: '#f1f5f9', padding: '3px 4px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                              <button
+                                type="button"
+                                title="Debugger: Mark as Fixed"
+                                onClick={() => updateChecklist(row.id, { debugger_status: row.debugger_status === 'passed' ? 'none' : 'passed' })}
+                                style={{
+                                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                  width: 22, height: 22, borderRadius: 4, border: 'none', cursor: 'pointer',
+                                  background: row.debugger_status === 'passed' ? '#16a34a' : 'transparent',
+                                  color: row.debugger_status === 'passed' ? '#ffffff' : '#64748b',
+                                  fontWeight: 700, fontSize: 11, transition: 'all 0.15s'
+                                }}
+                              >
+                                ✓
+                              </button>
+                              <button
+                                type="button"
+                                title="Debugger: Mark as Not Fixed"
+                                onClick={() => updateChecklist(row.id, { debugger_status: row.debugger_status === 'failed' ? 'none' : 'failed' })}
+                                style={{
+                                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                  width: 22, height: 22, borderRadius: 4, border: 'none', cursor: 'pointer',
+                                  background: row.debugger_status === 'failed' ? '#dc2626' : 'transparent',
+                                  color: row.debugger_status === 'failed' ? '#ffffff' : '#64748b',
+                                  fontWeight: 700, fontSize: 11, transition: 'all 0.15s'
+                                }}
+                              >
+                                ✗
+                              </button>
+                            </div>
+                          </td>
+                          <td onClick={e => e.stopPropagation()} style={{ textAlign: 'center' }}>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3, background: '#f1f5f9', padding: '3px 4px', borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                              <button
+                                type="button"
+                                title="Tester: Mark as Verified"
+                                onClick={() => updateChecklist(row.id, { tester_status: row.tester_status === 'passed' ? 'none' : 'passed' })}
+                                style={{
+                                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                  width: 22, height: 22, borderRadius: 4, border: 'none', cursor: 'pointer',
+                                  background: row.tester_status === 'passed' ? '#16a34a' : 'transparent',
+                                  color: row.tester_status === 'passed' ? '#ffffff' : '#64748b',
+                                  fontWeight: 700, fontSize: 11, transition: 'all 0.15s'
+                                }}
+                              >
+                                ✓
+                              </button>
+                              <button
+                                type="button"
+                                title="Tester: Mark as Retest Failed"
+                                onClick={() => updateChecklist(row.id, { tester_status: row.tester_status === 'failed' ? 'none' : 'failed' })}
+                                style={{
+                                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                  width: 22, height: 22, borderRadius: 4, border: 'none', cursor: 'pointer',
+                                  background: row.tester_status === 'failed' ? '#dc2626' : 'transparent',
+                                  color: row.tester_status === 'failed' ? '#ffffff' : '#64748b',
+                                  fontWeight: 700, fontSize: 11, transition: 'all 0.15s'
+                                }}
+                              >
+                                ✗
+                              </button>
+                            </div>
+                          </td>
+                          <td onClick={e => e.stopPropagation()} style={{ maxWidth: 220 }}>
+                            {editingReasonId === row.id ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <input
+                                  type="text"
+                                  autoFocus
+                                  value={editingReasonText}
+                                  onChange={e => setEditingReasonText(e.target.value)}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                      updateChecklist(row.id, { debug_reason: editingReasonText });
+                                      setEditingReasonId(null);
+                                    } else if (e.key === 'Escape') {
+                                      setEditingReasonId(null);
+                                    }
+                                  }}
+                                  placeholder="Why it didn't work..."
+                                  style={{ fontSize: 11, padding: '4px 6px', height: 26, width: 130 }}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    updateChecklist(row.id, { debug_reason: editingReasonText });
+                                    setEditingReasonId(null);
+                                  }}
+                                  style={{ border: 'none', background: '#254e40', color: '#fff', borderRadius: 4, padding: '4px 6px', fontSize: 10, cursor: 'pointer' }}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingReasonId(null)}
+                                  style={{ border: 'none', background: '#e2e8f0', color: '#475569', borderRadius: 4, padding: '4px 6px', fontSize: 10, cursor: 'pointer' }}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ) : (
+                              <div
+                                onClick={() => { setEditingReasonId(row.id); setEditingReasonText(row.debug_reason || ''); }}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                                  color: row.debug_reason ? '#334155' : '#94a3b8',
+                                  fontSize: 11, fontStyle: row.debug_reason ? 'normal' : 'italic'
+                                }}
+                                title="Click to add or edit reason why it didn't work"
+                              >
+                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 170 }}>
+                                  {row.debug_reason || '+ Add reason'}
+                                </span>
+                                <Edit3 size={11} color="#94a3b8" />
+                              </div>
+                            )}
+                          </td>
+                          <td className="date-cell">{fmt(row.created_at)}</td>
+                          <td>
+                            <ChevronRight size={15} color="#94a3b8" />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
             <div className="table-footer">
               <span>{filtered.length} of {total} items showing</span>
@@ -1204,15 +1522,26 @@ function App() {
                   {selectedIssue.type === 'Question' ? 'Context / What is unclear' : selectedIssue.type === 'Improvement' ? 'Expected Value / Benefit' : 'Expected Result'}
                 </strong>
                 <div style={{ padding: '12px 14px', background: '#f8fafc', borderRadius: 6, border: '1px solid #e2e8f0', fontSize: 12, color: '#334155', lineHeight: 1.6 }}>
-                  {selectedIssue.expected}
+                  {selectedIssue.expected || <span style={{ color: '#94a3b8', fontStyle: 'italic' }}>No additional context provided.</span>}
                 </div>
               </div>
+
+              {/* Voice Note Player if recorded */}
+              {selectedIssue.voice_attachment_id && (
+                <div style={{ marginBottom: 20, padding: '14px 16px', background: '#faf5ff', borderRadius: 8, border: '1px solid #e9d5ff' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, color: '#6d28d9' }}>
+                    <Volume2 size={16} />
+                    <strong style={{ fontSize: 12 }}>Recorded Voice Note</strong>
+                  </div>
+                  <audio controls src={`/api/guest/attachments/${selectedIssue.voice_attachment_id}`} style={{ width: '100%', height: 36 }} />
+                </div>
+              )}
 
               {/* Attachments Section */}
               {selectedIssue.attachments?.length > 0 && (
                 <div style={{ marginBottom: 24 }}>
                   <strong style={{ fontSize: 12, color: '#334155', display: 'block', marginBottom: 8 }}>
-                    Attachments ({selectedIssue.attachments.length})
+                    Photos & Screenshots ({selectedIssue.attachments.length})
                   </strong>
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                     {selectedIssue.attachments.map(att => (
@@ -1232,6 +1561,106 @@ function App() {
                   </div>
                 </div>
               )}
+
+              {/* Verification Checklist Card */}
+              <div style={{ marginBottom: 24, padding: '16px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 12 }}>
+                  <CheckCircle2 size={16} color="#254e40" />
+                  <strong style={{ fontSize: 13, color: '#1e293b' }}>Debugger & Tester Verification Checklist</strong>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+                  {/* Debugger Verification */}
+                  <div style={{ background: '#ffffff', padding: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: '#475569', display: 'block', marginBottom: 6 }}>
+                      1. Debugger Check
+                    </span>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => updateChecklist(selectedIssue.id, { debugger_status: selectedIssue.debugger_status === 'passed' ? 'none' : 'passed' })}
+                        style={{
+                          flex: 1, padding: '6px 8px', borderRadius: 5, border: '1px solid',
+                          borderColor: selectedIssue.debugger_status === 'passed' ? '#16a34a' : '#cbd5e1',
+                          background: selectedIssue.debugger_status === 'passed' ? '#dcfce7' : '#ffffff',
+                          color: selectedIssue.debugger_status === 'passed' ? '#15803d' : '#475569',
+                          fontSize: 11, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4
+                        }}
+                      >
+                        ✓ Fixed
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateChecklist(selectedIssue.id, { debugger_status: selectedIssue.debugger_status === 'failed' ? 'none' : 'failed' })}
+                        style={{
+                          flex: 1, padding: '6px 8px', borderRadius: 5, border: '1px solid',
+                          borderColor: selectedIssue.debugger_status === 'failed' ? '#dc2626' : '#cbd5e1',
+                          background: selectedIssue.debugger_status === 'failed' ? '#fee2e2' : '#ffffff',
+                          color: selectedIssue.debugger_status === 'failed' ? '#b91c1c' : '#475569',
+                          fontSize: 11, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4
+                        }}
+                      >
+                        ✗ Not Fixed
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Tester Verification */}
+                  <div style={{ background: '#ffffff', padding: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: '#475569', display: 'block', marginBottom: 6 }}>
+                      2. Tester Retest
+                    </span>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => updateChecklist(selectedIssue.id, { tester_status: selectedIssue.tester_status === 'passed' ? 'none' : 'passed' })}
+                        style={{
+                          flex: 1, padding: '6px 8px', borderRadius: 5, border: '1px solid',
+                          borderColor: selectedIssue.tester_status === 'passed' ? '#16a34a' : '#cbd5e1',
+                          background: selectedIssue.tester_status === 'passed' ? '#dcfce7' : '#ffffff',
+                          color: selectedIssue.tester_status === 'passed' ? '#15803d' : '#475569',
+                          fontSize: 11, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4
+                        }}
+                      >
+                        ✓ Verified
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateChecklist(selectedIssue.id, { tester_status: selectedIssue.tester_status === 'failed' ? 'none' : 'failed' })}
+                        style={{
+                          flex: 1, padding: '6px 8px', borderRadius: 5, border: '1px solid',
+                          borderColor: selectedIssue.tester_status === 'failed' ? '#dc2626' : '#cbd5e1',
+                          background: selectedIssue.tester_status === 'failed' ? '#fee2e2' : '#ffffff',
+                          color: selectedIssue.tester_status === 'failed' ? '#b91c1c' : '#475569',
+                          fontSize: 11, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4
+                        }}
+                      >
+                        ✗ Retest Failed
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Reason if after debugging it didn't work */}
+                <div style={{ background: '#ffffff', padding: 12, borderRadius: 6, border: '1px solid #e2e8f0' }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: '#475569', display: 'block', marginBottom: 6 }}>
+                    Reason if after debugging it didn't work:
+                  </span>
+                  <textarea
+                    rows={2}
+                    placeholder="e.g. Debugger tested login, but cache still persists on mobile checkout..."
+                    defaultValue={selectedIssue.debug_reason || ''}
+                    key={selectedIssue.id + (selectedIssue.debug_reason || '')}
+                    onBlur={e => {
+                      if (e.target.value !== (selectedIssue.debug_reason || '')) {
+                        updateChecklist(selectedIssue.id, { debug_reason: e.target.value });
+                      }
+                    }}
+                    style={{ fontSize: 11, width: '100%', marginBottom: 6 }}
+                  />
+                  <small style={{ color: '#94a3b8', fontSize: 10 }}>Auto-saves when you click out of the box.</small>
+                </div>
+              </div>
 
               {/* Handoff / Reassign Form (Tester <-> Dev) */}
               {reassignOpen && (
@@ -1442,21 +1871,76 @@ function App() {
                   </div>
                 </div>
 
+                {/* Main Issue / Idea description with Voice Recorder Button */}
                 <div className="field">
-                  <span>{form.type === 'Question' ? 'What is your question or doubt?' : form.type === 'Improvement' ? 'What is the improvement or idea?' : 'What is the issue?'}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span>
+                      {form.type === 'Question' ? 'What is your question or doubt?' : form.type === 'Improvement' ? 'What is the improvement or idea?' : 'What is the issue?'}
+                      <small style={{ color: '#94a3b8', marginLeft: 6, fontWeight: 400 }}>(Text or Voice)</small>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={isRecording ? stopRecording : startRecording}
+                      style={{
+                        border: 'none',
+                        background: isRecording ? '#fee2e2' : '#f1f5f9',
+                        color: isRecording ? '#dc2626' : '#254e40',
+                        borderRadius: 6,
+                        padding: '4px 10px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        cursor: 'pointer'
+                      }}
+                      title="Record a voice note"
+                    >
+                      {isRecording ? <Square size={12} fill="#dc2626" /> : <Mic size={13} color="#254e40" />}
+                      <span>{isRecording ? `Stop (${recordSec}s)` : '🎙 Record voice note'}</span>
+                    </button>
+                  </div>
+
                   <textarea
-                    required
                     rows={3}
-                    placeholder={form.type === 'Question' ? 'Ask what needs clarification or confirmation…' : form.type === 'Improvement' ? 'Describe what can be improved or added…' : 'Describe what went wrong…'}
+                    placeholder={form.type === 'Question' ? 'Type your question, or record a voice note above…' : form.type === 'Improvement' ? 'Describe the improvement, or record a voice note above…' : 'Describe what went wrong, or click the mic button to speak…'}
                     value={form.issue}
                     onChange={e => setForm(f => ({ ...f, issue: e.target.value }))}
                   />
+
+                  {/* Active Recording State */}
+                  {isRecording && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, marginTop: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', animation: 'spin 1s infinite' }} />
+                        <span style={{ fontSize: 11, fontWeight: 600, color: '#b91c1c' }}>Recording voice note… {recordSec}s</span>
+                      </div>
+                      <button type="button" onClick={stopRecording} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 9px', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
+                        Done recording
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Recorded Audio Preview */}
+                  {voiceUrl && (
+                    <div style={{ padding: '10px 12px', background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 6, marginTop: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: '#7e22ce', display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <Volume2 size={13} /> {voiceUploading ? 'Uploading voice recording…' : 'Voice note attached'}
+                        </span>
+                        <button type="button" onClick={cancelVoice} style={{ background: 'transparent', border: 'none', color: '#9333ea', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <Trash2 size={12} /> Discard voice note
+                        </button>
+                      </div>
+                      <audio controls src={voiceUrl} style={{ width: '100%', height: 32 }} />
+                    </div>
+                  )}
                 </div>
 
+                {/* Expected / Context */}
                 <div className="field">
-                  <span>{form.type === 'Question' ? 'Context / What is unclear?' : form.type === 'Improvement' ? 'Why would this help / expected outcome?' : 'What did you expect?'}</span>
+                  <span>{form.type === 'Question' ? 'Context / What is unclear?' : form.type === 'Improvement' ? 'Why would this help / expected outcome?' : 'What did you expect? (optional)'}</span>
                   <textarea
-                    required
                     rows={3}
                     placeholder={form.type === 'Question' ? 'Explain what scenario you are testing, what is ambiguous, or what should happen…' : form.type === 'Improvement' ? 'Explain the value or expected benefit…' : 'Describe what should have happened…'}
                     value={form.expected}
@@ -1464,26 +1948,63 @@ function App() {
                   />
                 </div>
 
-                {/* Screenshot */}
+                {/* Multi-Photo Screenshot Uploader with + Add photos button */}
                 <div className="field">
-                  <span>Screenshot (optional)</span>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span>Photos & Screenshots (optional)</span>
+                    <button
+                      type="button"
+                      onClick={() => fileRef.current?.click()}
+                      className="button secondary"
+                      style={{ padding: '4px 10px', fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                    >
+                      <Plus size={13} /> Add photos
+                    </button>
+                  </div>
+
                   <label className="dropzone" onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); uploadFile(e.dataTransfer.files); }}>
                     <Upload size={22} />
-                    <strong>{uploading ? `Uploading… ${uploadProgress}%` : 'Drop screenshots here, or browse'}</strong>
-                    <span>PNG, JPG, WebP · up to 10 MB · 5 max</span>
+                    <strong>{uploading ? `Uploading… ${uploadProgress}%` : 'Drop photos here, or click to browse'}</strong>
+                    <span>PNG, JPG, WebP · up to 10 MB each · up to 25 photos</span>
                     <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={uploading} onChange={e => uploadFile(e.target.files)} />
                   </label>
+
                   {files.length > 0 && (
-                    <div className="upload-previews">
-                      {files.map(f => (
-                        <div key={f.id}>
-                          {f.preview ? <img src={f.preview} alt={f.name} /> : <ImageIcon size={20} />}
-                          <span>{f.name}</span>
-                          <button type="button" onClick={() => { if (f.preview) URL.revokeObjectURL(f.preview); setFiles(files.filter(x => x.id !== f.id)); }}>
-                            <X size={13} />
-                          </button>
-                        </div>
-                      ))}
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <small style={{ fontSize: 10, fontWeight: 600, color: '#475569' }}>
+                          {files.length} / 25 photos attached
+                        </small>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            files.forEach(f => { if (f.preview) URL.revokeObjectURL(f.preview); });
+                            setFiles([]);
+                          }}
+                          style={{ background: 'transparent', border: 'none', color: '#dc2626', fontSize: 10, cursor: 'pointer' }}
+                        >
+                          Remove all
+                        </button>
+                      </div>
+
+                      <div className="upload-previews">
+                        {files.map(f => (
+                          <div key={f.id}>
+                            {f.preview ? <img src={f.preview} alt={f.name} /> : <ImageIcon size={20} />}
+                            <span>{f.name}</span>
+                            <button
+                              type="button"
+                              title="Remove photo"
+                              onClick={() => {
+                                if (f.preview) URL.revokeObjectURL(f.preview);
+                                setFiles(files.filter(x => x.id !== f.id));
+                              }}
+                            >
+                              <X size={13} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>

@@ -272,10 +272,25 @@ async function migrate() {
     down: async () => {
     }
   };
+  const m004 = {
+    up: async (k) => {
+      const hasDeb = await k.schema.hasColumn("issues", "debugger_status");
+      if (!hasDeb) {
+        await k.schema.table("issues", (t) => {
+          t.string("debugger_status").defaultTo("none");
+          t.string("tester_status").defaultTo("none");
+          t.text("debug_reason").defaultTo("");
+          t.string("voice_attachment_id").defaultTo("");
+        });
+      }
+    },
+    down: async () => {
+    }
+  };
   await db.migrate.latest({ migrationSource: {
-    getMigrations: async () => ["001", "002", "003"],
+    getMigrations: async () => ["001", "002", "003", "004"],
     getMigrationName: (m) => m,
-    getMigration: async (m) => m === "001" ? m001 : m === "002" ? m002 : m003
+    getMigration: async (m) => m === "001" ? m001 : m === "002" ? m002 : m === "003" ? m003 : m004
   } });
   try {
     const guest = await db("users").where({ email: "guest@helm.local" }).first();
@@ -487,6 +502,15 @@ async function validateImage(buffer, mime) {
   }
   return buffer;
 }
+async function validateMedia(buffer, mime) {
+  const normMime = (mime || "").toLowerCase().trim();
+  const isAudio = normMime.startsWith("audio/") || normMime === "video/webm" || normMime === "video/mp4";
+  if (isAudio) {
+    if (buffer.length > 25 * 1024 * 1024) throw fail(400, "Audio recording exceeds 25 MB.");
+    return buffer;
+  }
+  return validateImage(buffer, mime);
+}
 async function put(key, buffer, mime) {
   if (s3) await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: buffer, ContentType: mime }));
   else {
@@ -630,7 +654,7 @@ function createApp() {
       await db("users").insert({ id: gid, email: "guest@helm.local", name: "Guest", role: "tester", password_hash: "", verified: true, active: true, created_at: now() });
       guestUser = await db("users").where({ id: gid }).first();
     }
-    const bytes = await validateImage(req.file.buffer, req.file.mimetype);
+    const bytes = await validateMedia(req.file.buffer, req.file.mimetype);
     const id = randomUUID3();
     await put(id, bytes, req.file.mimetype);
     const base64Data = bytes.toString("base64");
@@ -664,14 +688,19 @@ function createApp() {
     const d = z.object({
       reporter_name: z.string().trim().min(2).max(100),
       reporter_role: z.enum(["tester", "developer"]).default("tester"),
-      issue: z.string().trim().min(5).max(15e3),
-      expected: z.string().trim().min(3).max(15e3),
+      issue: z.string().trim().max(15e3).default(""),
+      expected: z.string().trim().max(15e3).default(""),
       assigned_to: z.string().trim().max(100).default(""),
       assigned_role: z.enum(["tester", "developer", ""]).default(""),
       type: z.enum(["Bug", "Improvement", "Question"]).default("Bug"),
       project_id: z.string().optional(),
-      attachments: z.array(z.uuid()).max(5).default([]),
+      attachments: z.array(z.uuid()).max(25).default([]),
+      voice_attachment_id: z.string().max(100).default(""),
       idempotency_key: z.uuid()
+    }).superRefine((val, ctx) => {
+      if (!val.issue && !val.voice_attachment_id && !val.attachments.length) {
+        ctx.addIssue({ code: "custom", path: ["issue"], message: "Please enter text or record a voice note." });
+      }
     }).parse(req.body);
     let guestUser = await db("users").where({ email: "guest@helm.local" }).first();
     if (!guestUser) {
@@ -691,14 +720,15 @@ function createApp() {
         const files = await q("attachments").whereIn("id", d.attachments).whereNull("issue_id");
         if (files.length !== new Set(d.attachments).size) throw fail(400, "An attachment is unavailable. Please upload it again.");
       }
-      const title = "[" + d.reporter_name + "] " + d.issue.slice(0, 160);
+      const rawText = d.issue || (d.voice_attachment_id ? "Voice note report" : "New " + d.type);
+      const title = "[" + d.reporter_name + "] " + rawText.slice(0, 160);
       const [i] = await q("issues").insert({
         id: randomUUID3(),
         project_id: project.id,
         reporter_id: guestUser.id,
         type: d.type,
         title: title.slice(0, 180),
-        description: d.issue,
+        description: d.issue || (d.voice_attachment_id ? "Voice recording attached" : ""),
         steps: "",
         expected: d.expected,
         actual: "",
@@ -718,6 +748,10 @@ function createApp() {
         assigned_to: d.assigned_to,
         assigned_role: d.assigned_role,
         device: "Submitted by " + d.reporter_name + " (" + d.reporter_role + ")",
+        debugger_status: "none",
+        tester_status: "none",
+        debug_reason: "",
+        voice_attachment_id: d.voice_attachment_id,
         idempotency_key: d.idempotency_key,
         created_at: now(),
         updated_at: now()
@@ -726,6 +760,7 @@ function createApp() {
       i.reference = prefix + String(i.number).padStart(6, "0");
       await q("issues").where({ id: i.id }).update({ reference: i.reference });
       if (d.attachments.length) await q("attachments").whereIn("id", d.attachments).whereNull("issue_id").update({ issue_id: i.id, user_id: guestUser.id });
+      if (d.voice_attachment_id) await q("attachments").where({ id: d.voice_attachment_id }).update({ issue_id: i.id, user_id: guestUser.id });
       const submitDetail = d.assigned_to ? "Submitted by " + d.reporter_name + " (" + d.reporter_role + ") \xB7 Assigned to " + d.assigned_to + " (" + d.assigned_role + ")" : "Submitted by " + d.reporter_name + " (" + d.reporter_role + ")";
       await q("activity").insert({ id: randomUUID3(), issue_id: i.id, user_id: guestUser.id, action: d.reporter_name + " (" + d.reporter_role + ")", detail: submitDetail, internal: false, created_at: now() });
       saved = i;
@@ -737,7 +772,7 @@ function createApp() {
     res.json(list);
   });
   app2.get("/api/guest/issues", async (req, res) => {
-    const rows = await db("issues").join("users", "users.id", "issues.reporter_id").join("projects", "projects.id", "issues.project_id").where("users.email", "guest@helm.local").whereNot("issues.archived", true).select("issues.id", "issues.reference", "issues.type", "issues.title", "issues.description", "issues.expected", "issues.status", "issues.severity", "issues.created_at", "issues.assigned_to", "issues.assigned_role", "issues.device", "users.name as reporter_name", "projects.name as project_name", "projects.id as project_id").orderBy("issues.created_at", "desc").limit(200);
+    const rows = await db("issues").join("users", "users.id", "issues.reporter_id").join("projects", "projects.id", "issues.project_id").where("users.email", "guest@helm.local").whereNot("issues.archived", true).select("issues.id", "issues.reference", "issues.type", "issues.title", "issues.description", "issues.expected", "issues.status", "issues.severity", "issues.debugger_status", "issues.tester_status", "issues.debug_reason", "issues.voice_attachment_id", "issues.created_at", "issues.assigned_to", "issues.assigned_role", "issues.device", "users.name as reporter_name", "projects.name as project_name", "projects.id as project_id").orderBy("issues.created_at", "desc").limit(200);
     const withFiles = await Promise.all(rows.map(async (i) => {
       const attachments = await db("attachments").where({ issue_id: i.id }).select("id", "name", "mime", "size");
       return { ...i, attachments };
@@ -754,11 +789,14 @@ function createApp() {
   });
   app2.patch("/api/guest/issues/:id", async (req, res) => {
     const d = z.object({
-      actor_name: z.string().trim().min(1).max(100),
-      actor_role: z.enum(["tester", "developer"]),
+      actor_name: z.string().trim().min(1).max(100).default("User"),
+      actor_role: z.enum(["tester", "developer"]).default("developer"),
       assigned_to: z.string().trim().max(100).optional(),
       assigned_role: z.enum(["tester", "developer", ""]).optional(),
       status: z.string().max(60).optional(),
+      debugger_status: z.enum(["none", "passed", "failed"]).optional(),
+      tester_status: z.enum(["none", "passed", "failed"]).optional(),
+      debug_reason: z.string().trim().max(5e3).optional(),
       note: z.string().trim().max(5e3).optional()
     }).parse(req.body);
     const guestUser = await db("users").where({ email: "guest@helm.local" }).first();
@@ -769,9 +807,15 @@ function createApp() {
     if (d.assigned_to !== void 0) updates.assigned_to = d.assigned_to;
     if (d.assigned_role !== void 0) updates.assigned_role = d.assigned_role;
     if (d.status) updates.status = d.status;
+    if (d.debugger_status !== void 0) updates.debugger_status = d.debugger_status;
+    if (d.tester_status !== void 0) updates.tester_status = d.tester_status;
+    if (d.debug_reason !== void 0) updates.debug_reason = d.debug_reason;
     const parts = [];
     if (d.assigned_to !== void 0) parts.push(d.assigned_to ? "Assigned to " + d.assigned_to + " (" + d.assigned_role + ")" : "Unassigned");
     if (d.status) parts.push("Status \u2192 " + d.status);
+    if (d.debugger_status !== void 0) parts.push("Debugger: " + (d.debugger_status === "passed" ? "\u2713 Fixed" : d.debugger_status === "failed" ? "\u2717 Not Fixed" : "None"));
+    if (d.tester_status !== void 0) parts.push("Tester: " + (d.tester_status === "passed" ? "\u2713 Verified" : d.tester_status === "failed" ? "\u2717 Failed" : "None"));
+    if (d.debug_reason) parts.push("Reason: " + d.debug_reason);
     const action = d.actor_name + " (" + d.actor_role + ")";
     const detail = [parts.join(" \xB7 "), d.note].filter(Boolean).join(" \u2014 ");
     await db.transaction(async (q) => {

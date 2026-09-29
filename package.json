@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite --host 127.0.0.1\"",
     "build": "tsc --noEmit && vite build && node scripts/build-api.js",
+    "vercel-build": "tsc --noEmit && vite build && node scripts/build-api.js",
     "start": "tsx server/index.ts",
     "test": "node --import tsx --test tests/*.test.ts",
     "seed": "node --import tsx scripts/seed.ts",

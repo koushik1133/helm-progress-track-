@@ -50,6 +50,16 @@ export async function validateImage(buffer: Buffer, mime: string) {
   }
   return buffer;
 }
+
+export async function validateMedia(buffer: Buffer, mime: string) {
+  const normMime = (mime || '').toLowerCase().trim();
+  const isAudio = normMime.startsWith('audio/') || normMime === 'video/webm' || normMime === 'video/mp4';
+  if (isAudio) {
+    if (buffer.length > 25 * 1024 * 1024) throw fail(400, 'Audio recording exceeds 25 MB.');
+    return buffer;
+  }
+  return validateImage(buffer, mime);
+}
 export async function put(key:string,buffer:Buffer,mime:string){
   if(s3)await s3.send(new PutObjectCommand({Bucket:bucket,Key:key,Body:buffer,ContentType:mime}));
   else{

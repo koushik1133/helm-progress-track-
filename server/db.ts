@@ -111,10 +111,25 @@ export async function migrate() {
     },
     down: async () => {}
   };
+  // Migration 004: add debugger_status, tester_status, debug_reason, voice_attachment_id
+  const m004 = {
+    up: async (k:any) => {
+      const hasDeb = await k.schema.hasColumn('issues','debugger_status');
+      if(!hasDeb){
+        await k.schema.table('issues',(t:any)=>{
+          t.string('debugger_status').defaultTo('none'); // 'none' | 'passed' | 'failed'
+          t.string('tester_status').defaultTo('none');   // 'none' | 'passed' | 'failed'
+          t.text('debug_reason').defaultTo('');
+          t.string('voice_attachment_id').defaultTo('');
+        });
+      }
+    },
+    down: async () => {}
+  };
   await db.migrate.latest({migrationSource:{
-    getMigrations: async () => ['001','002','003'],
+    getMigrations: async () => ['001','002','003','004'],
     getMigrationName: (m:string) => m,
-    getMigration: async (m:string) => m==='001' ? m001 : m==='002' ? m002 : m003,
+    getMigration: async (m:string) => m==='001' ? m001 : m==='002' ? m002 : m==='003' ? m003 : m004,
   }});
 
   // Ensure default guest user exists
