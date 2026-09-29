@@ -298,10 +298,22 @@ async function migrate() {
     down: async () => {
     }
   };
+  const m005 = {
+    up: async (k) => {
+      const hasCol = await k.schema.hasColumn("issues", "expected_voice_id");
+      if (!hasCol) {
+        await k.schema.table("issues", (t) => {
+          t.string("expected_voice_id").defaultTo("");
+        });
+      }
+    },
+    down: async () => {
+    }
+  };
   await db.migrate.latest({ migrationSource: {
-    getMigrations: async () => ["001", "002", "003", "004"],
+    getMigrations: async () => ["001", "002", "003", "004", "005"],
     getMigrationName: (m) => m,
-    getMigration: async (m) => m === "001" ? m001 : m === "002" ? m002 : m === "003" ? m003 : m004
+    getMigration: async (m) => m === "001" ? m001 : m === "002" ? m002 : m === "003" ? m003 : m === "004" ? m004 : m005
   } });
   try {
     const guest = await db("users").where({ email: "guest@helm.local" }).first();
@@ -707,9 +719,10 @@ function createApp() {
       project_id: z.string().optional(),
       attachments: z.array(z.uuid()).max(25).default([]),
       voice_attachment_id: z.string().max(100).default(""),
+      expected_voice_id: z.string().max(100).default(""),
       idempotency_key: z.uuid()
     }).superRefine((val, ctx) => {
-      if (!val.issue && !val.voice_attachment_id && !val.attachments.length) {
+      if (!val.issue && !val.voice_attachment_id && !val.attachments.length && !val.expected_voice_id) {
         ctx.addIssue({ code: "custom", path: ["issue"], message: "Please enter text or record a voice note." });
       }
     }).parse(req.body);
@@ -741,7 +754,7 @@ function createApp() {
         title: title.slice(0, 180),
         description: d.issue || (d.voice_attachment_id ? "Voice recording attached" : ""),
         steps: "",
-        expected: d.expected,
+        expected: d.expected || (d.expected_voice_id ? "Voice recording attached" : ""),
         actual: "",
         reason: "",
         desired: "",
@@ -763,6 +776,7 @@ function createApp() {
         tester_status: "none",
         debug_reason: "",
         voice_attachment_id: d.voice_attachment_id,
+        expected_voice_id: d.expected_voice_id,
         idempotency_key: d.idempotency_key,
         created_at: now(),
         updated_at: now()
@@ -772,6 +786,7 @@ function createApp() {
       await q("issues").where({ id: i.id }).update({ reference: i.reference });
       if (d.attachments.length) await q("attachments").whereIn("id", d.attachments).whereNull("issue_id").update({ issue_id: i.id, user_id: guestUser.id });
       if (d.voice_attachment_id) await q("attachments").where({ id: d.voice_attachment_id }).update({ issue_id: i.id, user_id: guestUser.id });
+      if (d.expected_voice_id) await q("attachments").where({ id: d.expected_voice_id }).update({ issue_id: i.id, user_id: guestUser.id });
       const submitDetail = d.assigned_to ? "Submitted by " + d.reporter_name + " (" + d.reporter_role + ") \xB7 Assigned to " + d.assigned_to + " (" + d.assigned_role + ")" : "Submitted by " + d.reporter_name + " (" + d.reporter_role + ")";
       await q("activity").insert({ id: randomUUID3(), issue_id: i.id, user_id: guestUser.id, action: d.reporter_name + " (" + d.reporter_role + ")", detail: submitDetail, internal: false, created_at: now() });
       saved = i;
@@ -783,7 +798,7 @@ function createApp() {
     res.json(list);
   });
   app2.get("/api/guest/issues", async (req, res) => {
-    const rows = await db("issues").join("users", "users.id", "issues.reporter_id").join("projects", "projects.id", "issues.project_id").where("users.email", "guest@helm.local").whereNot("issues.archived", true).select("issues.id", "issues.reference", "issues.type", "issues.title", "issues.description", "issues.expected", "issues.status", "issues.severity", "issues.debugger_status", "issues.tester_status", "issues.debug_reason", "issues.voice_attachment_id", "issues.created_at", "issues.assigned_to", "issues.assigned_role", "issues.device", "users.name as reporter_name", "projects.name as project_name", "projects.id as project_id").orderBy("issues.created_at", "desc").limit(200);
+    const rows = await db("issues").join("users", "users.id", "issues.reporter_id").join("projects", "projects.id", "issues.project_id").where("users.email", "guest@helm.local").whereNot("issues.archived", true).select("issues.id", "issues.reference", "issues.type", "issues.title", "issues.description", "issues.expected", "issues.status", "issues.severity", "issues.debugger_status", "issues.tester_status", "issues.debug_reason", "issues.voice_attachment_id", "issues.expected_voice_id", "issues.created_at", "issues.assigned_to", "issues.assigned_role", "issues.device", "users.name as reporter_name", "projects.name as project_name", "projects.id as project_id").orderBy("issues.created_at", "desc").limit(200);
     const withFiles = await Promise.all(rows.map(async (i) => {
       const attachments = await db("attachments").where({ issue_id: i.id }).select("id", "name", "mime", "size");
       return { ...i, attachments };

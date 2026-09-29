@@ -35,7 +35,8 @@ type Issue = {
   tester_status?: 'none' | 'passed' | 'failed';
   debug_reason?: string;
   voice_attachment_id?: string;
-  attachments: { id: string; name: string }[];
+  expected_voice_id?: string;
+  attachments: { id: string; name: string; mime?: string; size?: number }[];
 };
 
 const STATUSES = ['New','Assigned','In Progress','Fixed – Needs Retest','Verified','Reopened','Closed'] as const;
@@ -154,27 +155,35 @@ function App() {
   const [editingReasonText, setEditingReasonText] = useState('');
 
   // Voice recording state
+  const [activeVoiceTarget, setActiveVoiceTarget] = useState<'issue' | 'expected' | null>(null);
   const [isRecording, setIsRecording]           = useState(false);
   const [recordSec, setRecordSec]               = useState(0);
+
+  // Issue description voice note
   const [voiceBlob, setVoiceBlob]               = useState<Blob | null>(null);
   const [voiceUrl, setVoiceUrl]                 = useState<string | null>(null);
   const [voiceAttachment, setVoiceAttachment]   = useState<Attachment | null>(null);
   const [voiceUploading, setVoiceUploading]     = useState(false);
+
+  // Expected outcome voice note
+  const [expVoiceBlob, setExpVoiceBlob]               = useState<Blob | null>(null);
+  const [expVoiceUrl, setExpVoiceUrl]                 = useState<string | null>(null);
+  const [expVoiceAttachment, setExpVoiceAttachment]   = useState<Attachment | null>(null);
+  const [expVoiceUploading, setExpVoiceUploading]     = useState(false);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<any>(null);
+
+  // Kanban Drag and drop
+  const [draggedIssueId, setDraggedIssueId] = useState<string | null>(null);
+  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
 
   // Jira Issue Detail Drawer
   const [selectedIssueId, setSelectedIssueId] = useState<string|null>(null);
   const selectedIssue = issues.find(i => i.id === selectedIssueId);
   const [logs, setLogs]                       = useState<Record<string, LogEntry[]>>({});
   const [logLoading, setLogLoading]           = useState(false);
-
-  // Reassign / Handoff
-  const [reassignOpen, setReassignOpen] = useState(false);
-  const [raForm, setRaForm] = useState({ actorName:'', actorRole:'tester' as Role, assignedTo:'', assignedRole:'developer' as Role, status:'Assigned', note:'' });
-  const [raErr,  setRaErr]  = useState('');
-  const [raBusy, setRaBusy] = useState(false);
 
   // New-issue modal
   const [showModal, setShowModal] = useState(false);
@@ -246,20 +255,8 @@ function App() {
         .then(entries => setLogs(l => ({ ...l, [selectedIssueId]: entries })))
         .catch(() => {})
         .finally(() => setLogLoading(false));
-      
-      const issue = issues.find(i => i.id === selectedIssueId);
-      if (issue) {
-        setRaForm({
-          actorName: '',
-          actorRole: 'tester',
-          assignedTo: issue.assigned_to || '',
-          assignedRole: (issue.assigned_role as Role) || 'developer',
-          status: issue.status || 'Assigned',
-          note: ''
-        });
-      }
     }
-  }, [selectedIssueId, issues]);
+  }, [selectedIssueId]);
 
   // ── Stats & Filtering ─────────────────────────────────────────────────────
   const visibleIssues = selectedProject === 'all' ? issues : issues.filter(i => i.project_id === selectedProject);
@@ -296,12 +293,13 @@ function App() {
   });
 
   // ── Voice Recording Helpers ───────────────────────────────────────────────
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (target: 'issue' | 'expected' = 'issue') => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunksRef.current = [];
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
+      setActiveVoiceTarget(target);
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data);
@@ -310,27 +308,40 @@ function App() {
       mediaRecorder.onstop = async () => {
         const mimeType = mediaRecorder.mimeType || 'audio/webm';
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
-        setVoiceBlob(blob);
         const url = URL.createObjectURL(blob);
-        setVoiceUrl(url);
         stream.getTracks().forEach(t => t.stop());
 
-        // Auto upload voice note
-        setVoiceUploading(true);
+        if (target === 'issue') {
+          setVoiceBlob(blob);
+          setVoiceUrl(url);
+          setVoiceUploading(true);
+        } else {
+          setExpVoiceBlob(blob);
+          setExpVoiceUrl(url);
+          setExpVoiceUploading(true);
+        }
+
         try {
           const f = new FormData();
           const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm';
-          f.append('file', blob, `voice-note-${Date.now()}.${ext}`);
+          const filename = target === 'expected' ? `expected-voice-${Date.now()}.${ext}` : `voice-note-${Date.now()}.${ext}`;
+          f.append('file', blob, filename);
           const saved = await api('/guest/upload', {
             method: 'POST',
             body: f
           });
-          setVoiceAttachment(saved);
-          notify('Voice note recorded & ready.');
+          if (target === 'issue') {
+            setVoiceAttachment(saved);
+          } else {
+            setExpVoiceAttachment(saved);
+          }
+          notify(target === 'expected' ? 'Expected outcome voice note recorded & ready.' : 'Voice note recorded & ready.');
         } catch (err: any) {
           setAddErr('Voice upload failed: ' + err.message);
         } finally {
-          setVoiceUploading(false);
+          if (target === 'issue') setVoiceUploading(false);
+          else setExpVoiceUploading(false);
+          setActiveVoiceTarget(null);
         }
       };
 
@@ -354,7 +365,7 @@ function App() {
     }
   }, [isRecording]);
 
-  const cancelVoice = useCallback(() => {
+  const cancelVoice = useCallback((target?: 'issue' | 'expected') => {
     if (isRecording) {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
@@ -362,12 +373,21 @@ function App() {
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
     }
-    if (voiceUrl) URL.revokeObjectURL(voiceUrl);
-    setVoiceBlob(null);
-    setVoiceUrl(null);
-    setVoiceAttachment(null);
+    if (!target || target === 'issue') {
+      if (voiceUrl) URL.revokeObjectURL(voiceUrl);
+      setVoiceBlob(null);
+      setVoiceUrl(null);
+      setVoiceAttachment(null);
+    }
+    if (!target || target === 'expected') {
+      if (expVoiceUrl) URL.revokeObjectURL(expVoiceUrl);
+      setExpVoiceBlob(null);
+      setExpVoiceUrl(null);
+      setExpVoiceAttachment(null);
+    }
     setRecordSec(0);
-  }, [isRecording, voiceUrl]);
+    setActiveVoiceTarget(null);
+  }, [isRecording, voiceUrl, expVoiceUrl]);
 
   // ── Debugger & Tester Checklist Actions ────────────────────────────────────
   async function updateChecklist(issueId: string, updates: { debugger_status?: 'none'|'passed'|'failed'; tester_status?: 'none'|'passed'|'failed'; debug_reason?: string }) {
@@ -414,34 +434,6 @@ function App() {
     }
   }
 
-  // ── Handoff & Reassign ────────────────────────────────────────────────────
-  async function saveHandoff(issueId: string) {
-    if (!raForm.actorName.trim()) { setRaErr('Enter your name.'); return; }
-    setRaBusy(true); setRaErr('');
-    try {
-      await api(`/guest/issues/${issueId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          actor_name: raForm.actorName,
-          actor_role: raForm.actorRole,
-          assigned_to: raForm.assignedTo,
-          assigned_role: raForm.assignedTo ? raForm.assignedRole : '',
-          status: raForm.status,
-          note: raForm.note,
-        })
-      });
-      setReassignOpen(false);
-      const e = await api(`/guest/issues/${issueId}/log`);
-      setLogs(l => ({ ...l, [issueId]: e }));
-      notify('Handoff saved & status updated.');
-      await load();
-    } catch (e: any) {
-      setRaErr(e.message);
-    } finally {
-      setRaBusy(false);
-    }
-  }
-
   // ── Upload ────────────────────────────────────────────────────────────────
   const uploadFile = useCallback(async (fileList: FileList | null) => {
     if (!fileList) return;
@@ -480,7 +472,7 @@ function App() {
   // ── Submit ────────────────────────────────────────────────────────────────
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.issue.trim() && !voiceAttachment && files.length === 0) {
+    if (!form.issue.trim() && !voiceAttachment && !form.expected.trim() && !expVoiceAttachment && files.length === 0) {
       setAddErr('Please enter what the issue is, record a voice note, or attach screenshots.');
       return;
     }
@@ -489,16 +481,19 @@ function App() {
       await api('/guest/submit', { method:'POST', body: JSON.stringify({
         reporter_name: form.name, reporter_role: form.role,
         type: form.type,
-        issue: form.issue, expected: form.expected,
+        issue: form.issue,
+        expected: form.expected || (expVoiceAttachment ? 'Voice recording attached' : ''),
         assigned_to: form.assignedTo, assigned_role: form.assignedTo ? form.assignedRole : '',
         project_id: form.projectId || (selectedProject !== 'all' ? selectedProject : undefined),
         attachments: files.map(f => f.id),
         voice_attachment_id: voiceAttachment ? voiceAttachment.id : '',
+        expected_voice_id: expVoiceAttachment ? expVoiceAttachment.id : '',
         idempotency_key: idempKey,
       })});
       files.forEach(f => { if (f.preview) URL.revokeObjectURL(f.preview); });
       setFiles([]);
-      cancelVoice();
+      cancelVoice('issue');
+      cancelVoice('expected');
       setForm(f => ({ ...f, issue:'', expected:'', assignedTo:'' }));
       setIdempKey(crypto.randomUUID());
       setShowModal(false);
@@ -688,18 +683,6 @@ function App() {
             <span>Questions</span>
             <b>{tabQuestions.length}</b>
           </button>
-        </nav>
-
-        {/* Filter by Role */}
-        <div className="nav-label">FILTER BY ROLE</div>
-        <nav>
-          {([['all','All Items', total], ['tester','Testers', currentTabItems.filter(i=>i.assigned_role==='tester').length], ['developer','Developers', withDev], ['unassigned','Unassigned', currentTabItems.filter(i=>!i.assigned_to).length]] as const).map(([val, label, count]) => (
-            <button key={val} className={filterRole===val ? 'active' : ''} onClick={() => setFilterRole(val as any)}>
-              {val==='all' ? <LayoutList size={16}/> : val==='tester' ? <Users size={16}/> : val==='developer' ? <UserCheck size={16}/> : <Inbox size={16}/>}
-              <span>{label}</span>
-              {count > 0 && <b>{count}</b>}
-            </button>
-          ))}
         </nav>
       </aside>
 
@@ -948,14 +931,36 @@ function App() {
                 {KANBAN_COLUMNS.map(col => {
                   const colItems = filtered.filter(i => (col.statuses as readonly string[]).includes(i.status));
                   return (
-                    <div key={col.id} style={{
-                      background: '#edf1e8',
-                      borderRadius: 10,
-                      border: '1px solid #dce2d4',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      minHeight: 380,
-                    }}>
+                    <div
+                      key={col.id}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        if (dragOverColumn !== col.id) setDragOverColumn(col.id);
+                      }}
+                      onDragLeave={(e) => {
+                        if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                        setDragOverColumn(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const issueId = e.dataTransfer.getData('text/plain') || draggedIssueId;
+                        if (issueId) {
+                          updateStatus(issueId, col.targetStatus);
+                        }
+                        setDraggedIssueId(null);
+                        setDragOverColumn(null);
+                      }}
+                      style={{
+                        background: dragOverColumn === col.id ? '#e4ecdf' : '#edf1e8',
+                        borderRadius: 10,
+                        border: dragOverColumn === col.id ? '2px dashed #254e40' : '1px solid #dce2d4',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        minHeight: 380,
+                        transition: 'all 0.15s ease',
+                      }}
+                    >
                       {/* Column Header */}
                       <div style={{
                         padding: '12px 14px',
@@ -992,12 +997,22 @@ function App() {
                       }}>
                         {colItems.length === 0 ? (
                           <div style={{ padding: '28px 12px', textAlign: 'center', color: '#94a3b8', fontSize: 11, border: '1px dashed #cbd5e1', borderRadius: 8 }}>
-                            No tickets
+                            No tickets (drag items here)
                           </div>
                         ) : (
                           colItems.map(row => (
                             <div
                               key={row.id}
+                              draggable={true}
+                              onDragStart={(e) => {
+                                e.dataTransfer.setData('text/plain', row.id);
+                                e.dataTransfer.effectAllowed = 'move';
+                                setDraggedIssueId(row.id);
+                              }}
+                              onDragEnd={() => {
+                                setDraggedIssueId(null);
+                                setDragOverColumn(null);
+                              }}
                               onClick={() => setSelectedIssueId(row.id)}
                               style={{
                                 background: '#ffffff',
@@ -1005,11 +1020,13 @@ function App() {
                                 border: selectedIssueId === row.id ? '2px solid #254e40' : '1px solid #dce2d4',
                                 padding: '12px 14px',
                                 boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-                                cursor: 'pointer',
+                                cursor: 'grab',
+                                opacity: draggedIssueId === row.id ? 0.45 : 1,
+                                transform: draggedIssueId === row.id ? 'scale(0.98)' : 'none',
                                 transition: 'all 0.15s ease',
                               }}
-                              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 6px 16px rgba(0,0,0,0.08)'; }}
-                              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 1px 3px rgba(0,0,0,0.04)'; }}
+                              onMouseEnter={e => { if (draggedIssueId !== row.id) (e.currentTarget as HTMLElement).style.boxShadow = '0 6px 16px rgba(0,0,0,0.08)'; }}
+                              onMouseLeave={e => { if (draggedIssueId !== row.id) (e.currentTarget as HTMLElement).style.boxShadow = '0 1px 3px rgba(0,0,0,0.04)'; }}
                             >
                               {/* Top row: Type + Key + Project */}
                               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 7 }}>
@@ -1456,15 +1473,6 @@ function App() {
                   {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
-
-              <button
-                type="button"
-                onClick={() => setReassignOpen(!reassignOpen)}
-                className="button secondary"
-                style={{ padding: '6px 12px', fontSize: 11 }}
-              >
-                <UserCheck size={13} /> {reassignOpen ? 'Hide Handoff' : 'Handoff / Reassign'}
-              </button>
             </div>
 
             {/* Drawer Body */}
@@ -1516,6 +1524,17 @@ function App() {
                 </div>
               </div>
 
+              {/* Voice Note Player if recorded for issue */}
+              {selectedIssue.voice_attachment_id && (
+                <div style={{ marginBottom: 20, padding: '14px 16px', background: '#faf5ff', borderRadius: 8, border: '1px solid #e9d5ff' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, color: '#6d28d9' }}>
+                    <Volume2 size={16} />
+                    <strong style={{ fontSize: 12 }}>Issue Description Voice Note</strong>
+                  </div>
+                  <audio controls src={`/api/guest/attachments/${selectedIssue.voice_attachment_id}`} style={{ width: '100%', height: 36 }} />
+                </div>
+              )}
+
               {/* Expected / Benefit Section */}
               <div style={{ marginBottom: 20 }}>
                 <strong style={{ fontSize: 12, color: '#334155', display: 'block', marginBottom: 6 }}>
@@ -1524,40 +1543,69 @@ function App() {
                 <div style={{ padding: '12px 14px', background: '#f8fafc', borderRadius: 6, border: '1px solid #e2e8f0', fontSize: 12, color: '#334155', lineHeight: 1.6 }}>
                   {selectedIssue.expected || <span style={{ color: '#94a3b8', fontStyle: 'italic' }}>No additional context provided.</span>}
                 </div>
+                {/* Expected Voice Note Player if recorded */}
+                {selectedIssue.expected_voice_id && (
+                  <div style={{ marginTop: 10, padding: '12px 14px', background: '#faf5ff', borderRadius: 8, border: '1px solid #e9d5ff' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, color: '#6d28d9' }}>
+                      <Volume2 size={15} />
+                      <strong style={{ fontSize: 12 }}>Expected Outcome Voice Note</strong>
+                    </div>
+                    <audio controls src={`/api/guest/attachments/${selectedIssue.expected_voice_id}`} style={{ width: '100%', height: 34 }} />
+                  </div>
+                )}
               </div>
 
-              {/* Voice Note Player if recorded */}
-              {selectedIssue.voice_attachment_id && (
-                <div style={{ marginBottom: 20, padding: '14px 16px', background: '#faf5ff', borderRadius: 8, border: '1px solid #e9d5ff' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, color: '#6d28d9' }}>
-                    <Volume2 size={16} />
-                    <strong style={{ fontSize: 12 }}>Recorded Voice Note</strong>
-                  </div>
-                  <audio controls src={`/api/guest/attachments/${selectedIssue.voice_attachment_id}`} style={{ width: '100%', height: 36 }} />
-                </div>
-              )}
-
-              {/* Attachments Section */}
-              {selectedIssue.attachments?.length > 0 && (
+              {/* Attachments Section - Thumbnail Gallery to review all attached */}
+              {selectedIssue.attachments?.filter(att => att.id !== selectedIssue.voice_attachment_id && att.id !== selectedIssue.expected_voice_id).length > 0 && (
                 <div style={{ marginBottom: 24 }}>
                   <strong style={{ fontSize: 12, color: '#334155', display: 'block', marginBottom: 8 }}>
-                    Photos & Screenshots ({selectedIssue.attachments.length})
+                    Photos & Screenshots ({selectedIssue.attachments.filter(att => att.id !== selectedIssue.voice_attachment_id && att.id !== selectedIssue.expected_voice_id).length})
                   </strong>
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                    {selectedIssue.attachments.map(att => (
-                      <div
-                        key={att.id}
-                        onClick={() => setActiveImage(`/api/guest/attachments/${att.id}`)}
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px',
-                          background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6,
-                          fontSize: 11, cursor: 'pointer', color: '#0369a1'
-                        }}
-                      >
-                        <ImageIcon size={14} />
-                        <span>{att.name}</span>
-                      </div>
-                    ))}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10 }}>
+                    {selectedIssue.attachments.filter(att => att.id !== selectedIssue.voice_attachment_id && att.id !== selectedIssue.expected_voice_id).map(att => {
+                      const isAud = att.mime?.startsWith('audio/') || /\.(webm|mp4|ogg|mp3|m4a)$/i.test(att.name);
+                      if (isAud) {
+                        return (
+                          <div key={att.id} style={{ gridColumn: '1 / -1', padding: '10px 12px', background: '#faf5ff', borderRadius: 6, border: '1px solid #e9d5ff' }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: '#7e22ce', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 5 }}>
+                              <Volume2 size={13} /> {att.name}
+                            </div>
+                            <audio controls src={`/api/guest/attachments/${att.id}`} style={{ width: '100%', height: 32 }} />
+                          </div>
+                        );
+                      }
+                      return (
+                        <div
+                          key={att.id}
+                          onClick={() => setActiveImage(`/api/guest/attachments/${att.id}`)}
+                          style={{
+                            borderRadius: 8,
+                            border: '1px solid #cbd5e1',
+                            overflow: 'hidden',
+                            background: '#f8fafc',
+                            cursor: 'pointer',
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                            transition: 'transform 0.15s, box-shadow 0.15s',
+                          }}
+                          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)'; (e.currentTarget as HTMLElement).style.boxShadow = '0 6px 14px rgba(0,0,0,0.1)'; }}
+                          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = 'none'; (e.currentTarget as HTMLElement).style.boxShadow = '0 1px 3px rgba(0,0,0,0.05)'; }}
+                          title={`Click to preview ${att.name}`}
+                        >
+                          <div style={{ width: '100%', height: 95, background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                            <img
+                              src={`/api/guest/attachments/${att.id}`}
+                              alt={att.name}
+                              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                              onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
+                            />
+                          </div>
+                          <div style={{ padding: '6px 8px', fontSize: 10, color: '#334155', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', background: '#fff', borderTop: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <ImageIcon size={11} color="#64748b" />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{att.name}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1661,78 +1709,6 @@ function App() {
                   <small style={{ color: '#94a3b8', fontSize: 10 }}>Auto-saves when you click out of the box.</small>
                 </div>
               </div>
-
-              {/* Handoff / Reassign Form (Tester <-> Dev) */}
-              {reassignOpen && (
-                <div style={{
-                  padding: 16,
-                  background: '#fffbeb',
-                  border: '1px solid #fde68a',
-                  borderRadius: 8,
-                  marginBottom: 24,
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
-                    <UserCheck size={15} color="#b45309" />
-                    <strong style={{ fontSize: 12, color: '#92400e' }}>Handoff issue to Tester or Developer</strong>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <span>Your name</span>
-                      <input placeholder="e.g. Jamie" value={raForm.actorName} onChange={e => setRaForm(f => ({ ...f, actorName: e.target.value }))} />
-                    </div>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <span>Your role</span>
-                      <RoleToggle value={raForm.actorRole} onChange={r => setRaForm(f => ({ ...f, actorRole: r }))} />
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <span>Assign to</span>
-                      <input placeholder="e.g. Alex" value={raForm.assignedTo} onChange={e => setRaForm(f => ({ ...f, assignedTo: e.target.value }))} />
-                    </div>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <span>Their role</span>
-                      <RoleToggle value={raForm.assignedRole} onChange={r => setRaForm(f => ({ ...f, assignedRole: r }))} />
-                    </div>
-                  </div>
-
-                  <div className="field" style={{ marginBottom: 10 }}>
-                    <span>Transition Status</span>
-                    <select value={raForm.status} onChange={e => setRaForm(f => ({ ...f, status: e.target.value }))}>
-                      {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-
-                  <div className="field" style={{ marginBottom: 12 }}>
-                    <span>Handoff note (what was done or what to check)</span>
-                    <input placeholder="e.g. Fixed in build v2.6, please retest Safari export" value={raForm.note} onChange={e => setRaForm(f => ({ ...f, note: e.target.value }))} />
-                  </div>
-
-                  {raErr && <div className="error" style={{ marginBottom: 10 }}>{raErr}</div>}
-
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      type="button"
-                      className="button"
-                      disabled={raBusy}
-                      onClick={() => saveHandoff(selectedIssue.id)}
-                      style={{ fontSize: 11, padding: '7px 14px' }}
-                    >
-                      {raBusy ? <Loader2 size={13} className="spin" /> : 'Save Handoff'}
-                    </button>
-                    <button
-                      type="button"
-                      className="button secondary"
-                      onClick={() => setReassignOpen(false)}
-                      style={{ fontSize: 11, padding: '7px 14px' }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
 
               {/* Activity & Stage Log Timeline */}
               <div>
@@ -1880,11 +1856,15 @@ function App() {
                     </span>
                     <button
                       type="button"
-                      onClick={isRecording ? stopRecording : startRecording}
+                      onClick={() => {
+                        if (isRecording && activeVoiceTarget === 'issue') stopRecording();
+                        else startRecording('issue');
+                      }}
+                      disabled={isRecording && activeVoiceTarget !== 'issue'}
                       style={{
                         border: 'none',
-                        background: isRecording ? '#fee2e2' : '#f1f5f9',
-                        color: isRecording ? '#dc2626' : '#254e40',
+                        background: isRecording && activeVoiceTarget === 'issue' ? '#fee2e2' : '#f1f5f9',
+                        color: isRecording && activeVoiceTarget === 'issue' ? '#dc2626' : '#254e40',
                         borderRadius: 6,
                         padding: '4px 10px',
                         fontSize: 11,
@@ -1892,12 +1872,12 @@ function App() {
                         display: 'inline-flex',
                         alignItems: 'center',
                         gap: 5,
-                        cursor: 'pointer'
+                        cursor: isRecording && activeVoiceTarget !== 'issue' ? 'not-allowed' : 'pointer'
                       }}
                       title="Record a voice note"
                     >
-                      {isRecording ? <Square size={12} fill="#dc2626" /> : <Mic size={13} color="#254e40" />}
-                      <span>{isRecording ? `Stop (${recordSec}s)` : '🎙 Record voice note'}</span>
+                      {isRecording && activeVoiceTarget === 'issue' ? <Square size={12} fill="#dc2626" /> : <Mic size={13} color="#254e40" />}
+                      <span>{isRecording && activeVoiceTarget === 'issue' ? `Stop (${recordSec}s)` : '🎙 Record voice note'}</span>
                     </button>
                   </div>
 
@@ -1908,8 +1888,8 @@ function App() {
                     onChange={e => setForm(f => ({ ...f, issue: e.target.value }))}
                   />
 
-                  {/* Active Recording State */}
-                  {isRecording && (
+                  {/* Active Recording State for Issue */}
+                  {isRecording && activeVoiceTarget === 'issue' && (
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, marginTop: 6 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', animation: 'spin 1s infinite' }} />
@@ -1921,14 +1901,14 @@ function App() {
                     </div>
                   )}
 
-                  {/* Recorded Audio Preview */}
+                  {/* Recorded Audio Preview for Issue */}
                   {voiceUrl && (
                     <div style={{ padding: '10px 12px', background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 6, marginTop: 6 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                         <span style={{ fontSize: 11, fontWeight: 600, color: '#7e22ce', display: 'flex', alignItems: 'center', gap: 5 }}>
                           <Volume2 size={13} /> {voiceUploading ? 'Uploading voice recording…' : 'Voice note attached'}
                         </span>
-                        <button type="button" onClick={cancelVoice} style={{ background: 'transparent', border: 'none', color: '#9333ea', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <button type="button" onClick={() => cancelVoice('issue')} style={{ background: 'transparent', border: 'none', color: '#9333ea', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
                           <Trash2 size={12} /> Discard voice note
                         </button>
                       </div>
@@ -1937,15 +1917,74 @@ function App() {
                   )}
                 </div>
 
-                {/* Expected / Context */}
+                {/* Expected / Context with Voice Recorder Button */}
                 <div className="field">
-                  <span>{form.type === 'Question' ? 'Context / What is unclear?' : form.type === 'Improvement' ? 'Why would this help / expected outcome?' : 'What did you expect? (optional)'}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span>
+                      {form.type === 'Question' ? 'Context / What is unclear?' : form.type === 'Improvement' ? 'Why would this help / expected outcome?' : 'What did you expect?'}
+                      <small style={{ color: '#94a3b8', marginLeft: 6, fontWeight: 400 }}>(Text or Voice)</small>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isRecording && activeVoiceTarget === 'expected') stopRecording();
+                        else startRecording('expected');
+                      }}
+                      disabled={isRecording && activeVoiceTarget !== 'expected'}
+                      style={{
+                        border: 'none',
+                        background: isRecording && activeVoiceTarget === 'expected' ? '#fee2e2' : '#f1f5f9',
+                        color: isRecording && activeVoiceTarget === 'expected' ? '#dc2626' : '#254e40',
+                        borderRadius: 6,
+                        padding: '4px 10px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        cursor: isRecording && activeVoiceTarget !== 'expected' ? 'not-allowed' : 'pointer'
+                      }}
+                      title="Record voice note for expected outcome"
+                    >
+                      {isRecording && activeVoiceTarget === 'expected' ? <Square size={12} fill="#dc2626" /> : <Mic size={13} color="#254e40" />}
+                      <span>{isRecording && activeVoiceTarget === 'expected' ? `Stop (${recordSec}s)` : '🎙 Record voice note'}</span>
+                    </button>
+                  </div>
+
                   <textarea
                     rows={3}
-                    placeholder={form.type === 'Question' ? 'Explain what scenario you are testing, what is ambiguous, or what should happen…' : form.type === 'Improvement' ? 'Explain the value or expected benefit…' : 'Describe what should have happened…'}
+                    placeholder={form.type === 'Question' ? 'Explain what scenario you are testing, what is ambiguous, or record voice note…' : form.type === 'Improvement' ? 'Explain the value or expected benefit, or record voice note…' : 'Describe what should have happened, or click the mic button to speak…'}
                     value={form.expected}
                     onChange={e => setForm(f => ({ ...f, expected: e.target.value }))}
                   />
+
+                  {/* Active Recording State for Expected */}
+                  {isRecording && activeVoiceTarget === 'expected' && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, marginTop: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', animation: 'spin 1s infinite' }} />
+                        <span style={{ fontSize: 11, fontWeight: 600, color: '#b91c1c' }}>Recording voice note… {recordSec}s</span>
+                      </div>
+                      <button type="button" onClick={stopRecording} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 9px', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
+                        Done recording
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Recorded Audio Preview for Expected */}
+                  {expVoiceUrl && (
+                    <div style={{ padding: '10px 12px', background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 6, marginTop: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: '#7e22ce', display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <Volume2 size={13} /> {expVoiceUploading ? 'Uploading voice recording…' : 'Expected outcome voice note attached'}
+                        </span>
+                        <button type="button" onClick={() => cancelVoice('expected')} style={{ background: 'transparent', border: 'none', color: '#9333ea', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <Trash2 size={12} /> Discard voice note
+                        </button>
+                      </div>
+                      <audio controls src={expVoiceUrl} style={{ width: '100%', height: 32 }} />
+                    </div>
+                  )}
                 </div>
 
                 {/* Multi-Photo Screenshot Uploader with + Add photos button */}

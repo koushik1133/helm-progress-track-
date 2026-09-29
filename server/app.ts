@@ -85,9 +85,10 @@ export function createApp(){
       project_id:z.string().optional(),
       attachments:z.array(z.uuid()).max(25).default([]),
       voice_attachment_id:z.string().max(100).default(''),
+      expected_voice_id:z.string().max(100).default(''),
       idempotency_key:z.uuid(),
     }).superRefine((val,ctx)=>{
-      if(!val.issue&&!val.voice_attachment_id&&!val.attachments.length){
+      if(!val.issue&&!val.voice_attachment_id&&!val.attachments.length&&!val.expected_voice_id){
         ctx.addIssue({code:'custom',path:['issue'],message:'Please enter text or record a voice note.'});
       }
     }).parse(req.body);
@@ -115,7 +116,7 @@ export function createApp(){
         id:randomUUID(),project_id:project.id,reporter_id:guestUser.id,
         type:d.type,title:title.slice(0,180),
         description:d.issue || (d.voice_attachment_id ? 'Voice recording attached' : ''),
-        steps:'',expected:d.expected,actual:'',
+        steps:'',expected:d.expected || (d.expected_voice_id ? 'Voice recording attached' : ''),actual:'',
         reason:'',desired:'',notes:'',url:'',environment:'staging',
         build:'',severity:'Medium',priority:'Medium',category:'General',
         status:'New',version:1,cycle:0,archived:false,
@@ -123,6 +124,7 @@ export function createApp(){
         device:'Submitted by '+d.reporter_name+' ('+d.reporter_role+')',
         debugger_status:'none',tester_status:'none',debug_reason:'',
         voice_attachment_id:d.voice_attachment_id,
+        expected_voice_id:d.expected_voice_id,
         idempotency_key:d.idempotency_key,
         created_at:now(),updated_at:now(),
       }).returning('*');
@@ -131,6 +133,7 @@ export function createApp(){
       await q('issues').where({id:i.id}).update({reference:i.reference});
       if(d.attachments.length)await q('attachments').whereIn('id',d.attachments).whereNull('issue_id').update({issue_id:i.id,user_id:guestUser.id});
       if(d.voice_attachment_id)await q('attachments').where({id:d.voice_attachment_id}).update({issue_id:i.id,user_id:guestUser.id});
+      if(d.expected_voice_id)await q('attachments').where({id:d.expected_voice_id}).update({issue_id:i.id,user_id:guestUser.id});
       const submitDetail=d.assigned_to?'Submitted by '+d.reporter_name+' ('+d.reporter_role+') · Assigned to '+d.assigned_to+' ('+d.assigned_role+')':'Submitted by '+d.reporter_name+' ('+d.reporter_role+')';
       await q('activity').insert({id:randomUUID(),issue_id:i.id,user_id:guestUser.id,action:d.reporter_name+' ('+d.reporter_role+')',detail:submitDetail,internal:false,created_at:now()});
       saved=i;
@@ -147,7 +150,7 @@ export function createApp(){
       .join('projects','projects.id','issues.project_id')
       .where('users.email','guest@helm.local')
       .whereNot('issues.archived',true)
-      .select('issues.id','issues.reference','issues.type','issues.title','issues.description','issues.expected','issues.status','issues.severity','issues.debugger_status','issues.tester_status','issues.debug_reason','issues.voice_attachment_id','issues.created_at','issues.assigned_to','issues.assigned_role','issues.device','users.name as reporter_name','projects.name as project_name','projects.id as project_id')
+      .select('issues.id','issues.reference','issues.type','issues.title','issues.description','issues.expected','issues.status','issues.severity','issues.debugger_status','issues.tester_status','issues.debug_reason','issues.voice_attachment_id','issues.expected_voice_id','issues.created_at','issues.assigned_to','issues.assigned_role','issues.device','users.name as reporter_name','projects.name as project_name','projects.id as project_id')
       .orderBy('issues.created_at','desc')
       .limit(200);
     const withFiles=await Promise.all(rows.map(async i=>{

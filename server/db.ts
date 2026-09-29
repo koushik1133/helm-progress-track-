@@ -137,10 +137,22 @@ export async function migrate() {
     },
     down: async () => {}
   };
+  // Migration 005: add expected_voice_id
+  const m005 = {
+    up: async (k:any) => {
+      const hasCol = await k.schema.hasColumn('issues','expected_voice_id');
+      if(!hasCol){
+        await k.schema.table('issues',(t:any)=>{
+          t.string('expected_voice_id').defaultTo('');
+        });
+      }
+    },
+    down: async () => {}
+  };
   await db.migrate.latest({migrationSource:{
-    getMigrations: async () => ['001','002','003','004'],
+    getMigrations: async () => ['001','002','003','004','005'],
     getMigrationName: (m:string) => m,
-    getMigration: async (m:string) => m==='001' ? m001 : m==='002' ? m002 : m==='003' ? m003 : m004,
+    getMigration: async (m:string) => m==='001' ? m001 : m==='002' ? m002 : m==='003' ? m003 : m==='004' ? m004 : m005,
   }});
 
   // Ensure default guest user exists
