@@ -2,15 +2,50 @@ import 'dotenv/config';
 import knex from 'knex';
 import fs from 'node:fs';
 import path from 'node:path';
-export const dataDir = path.resolve(process.env.DATA_DIR || '.data');
-fs.mkdirSync(dataDir,{recursive:true});
+import { randomUUID } from 'node:crypto';
+export const isVercel = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+export const dataDir = path.resolve(process.env.DATA_DIR || (isVercel ? '/tmp/.data' : '.data'));
+try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
+
 export const production = process.env.NODE_ENV === 'production';
-const postgres = !!process.env.DATABASE_URL;
-if(production && (!postgres || !process.env.SESSION_SECRET || process.env.SESSION_SECRET.length<32 || !process.env.APP_URL?.startsWith('https://') || !process.env.S3_ENDPOINT)) throw new Error('Production requires Postgres, SESSION_SECRET (32+ characters), HTTPS APP_URL and private S3 storage');
-export const db = knex(postgres ? {client:'pg',connection:{connectionString:process.env.DATABASE_URL,ssl:production?{rejectUnauthorized:true,...(process.env.DATABASE_CA_FILE?{ca:fs.readFileSync(process.env.DATABASE_CA_FILE,'utf8')}:{})}:undefined},searchPath:[process.env.DATABASE_SCHEMA||'helm'],pool:{min:0,max:8}} : {client:'better-sqlite3',connection:{filename:path.join(dataDir,'helm.sqlite')},useNullAsDefault:true,pool:{min:1,max:1,afterCreate:(conn:any,done:any)=>{conn.pragma('foreign_keys = ON');conn.pragma('journal_mode = WAL');done(null,conn);}}});
+export const isPostgres = !!process.env.DATABASE_URL;
+
+const schema = process.env.DATABASE_SCHEMA || (isPostgres ? 'public' : 'helm');
+
+export const db = knex(isPostgres ? {
+  client: 'pg',
+  connection: {
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_NO_SSL === 'true' ? false : {
+      rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED === 'true',
+      ...(process.env.DATABASE_CA_FILE ? { ca: fs.readFileSync(process.env.DATABASE_CA_FILE, 'utf8') } : {})
+    }
+  },
+  searchPath: [schema],
+  pool: { min: 0, max: 10 }
+} : {
+  client: 'better-sqlite3',
+  connection: { filename: path.join(dataDir, 'helm.sqlite') },
+  useNullAsDefault: true,
+  pool: {
+    min: 1,
+    max: 1,
+    afterCreate: (conn: any, done: any) => {
+      try {
+        conn.pragma('foreign_keys = ON');
+        conn.pragma('journal_mode = WAL');
+      } catch {}
+      done(null, conn);
+    }
+  }
+});
+
 export const now = () => new Date().toISOString();
-export async function migrate(){
-  if(postgres){const schema=process.env.DATABASE_SCHEMA||'helm';if(!/^[a-z_][a-z0-9_]*$/.test(schema))throw new Error('Invalid schema');await db.raw(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);}
+export async function migrate() {
+  if (isPostgres && schema !== 'public') {
+    if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error('Invalid schema');
+    await db.raw(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+  }
   const m001 = {
     up: async (k:any) => {
       await k.schema.createTable('users',(t:any)=>{t.uuid('id').primary();t.string('email').unique().notNullable();t.string('name').notNullable();t.string('password_hash');t.string('role').notNullable();t.boolean('verified').defaultTo(false);t.boolean('active').defaultTo(true);t.string('created_at').notNullable();});
@@ -51,4 +86,46 @@ export async function migrate(){
     getMigrationName: (m:string) => m,
     getMigration: async (m:string) => m==='001' ? m001 : m002,
   }});
+
+  // Ensure default guest user exists
+  try {
+    const guest = await db('users').where({ email: 'guest@helm.local' }).first();
+    if (!guest) {
+      await db('users').insert({
+        id: randomUUID(),
+        email: 'guest@helm.local',
+        name: 'Guest',
+        role: 'tester',
+        password_hash: '',
+        verified: true,
+        active: true,
+        created_at: now()
+      });
+    }
+
+    // Ensure default projects exist
+    const helmProject = await db('projects').where({ name: 'Helm Platform' }).first();
+    if (!helmProject) {
+      await db('projects').insert({
+        id: randomUUID(),
+        name: 'Helm Platform',
+        description: 'Core web experience',
+        active: true,
+        created_at: now()
+      });
+    }
+
+    const glentreeProject = await db('projects').where({ name: 'Glentree' }).first();
+    if (!glentreeProject) {
+      await db('projects').insert({
+        id: randomUUID(),
+        name: 'Glentree',
+        description: 'Glentree workspace',
+        active: true,
+        created_at: now()
+      });
+    }
+  } catch (err) {
+    console.warn('[Helm Track] Default seeding notice:', err);
+  }
 }

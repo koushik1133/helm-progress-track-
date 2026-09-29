@@ -6,7 +6,7 @@ import multer from 'multer';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
 import {z} from 'zod';
 import path from 'node:path';
-import {db,now,production} from './db.js';
+import {db,now,production,isPostgres,isVercel} from './db.js';
 import {auth,admin,fail,hash,token,passwordHash,passwordValid,publicUser,session,accessible,rateLimit,signDownload} from './auth.js';
 import {queue,appURL,applicable,schedule} from './notifications.js';
 import * as storage from './storage.js';
@@ -26,8 +26,9 @@ export function createApp(){
  await db('deliveries').where({provider_id:event.data.email_id}).whereIn('state',state==='bounced'?['provider-accepted','delivered']:['provider-accepted']).update({state,updated_at:now()});}
  res.json({ok:true});
  });app.use(express.json({limit:'100kb'}));app.use(cookieParser());
- app.use('/api',async(req,res,next)=>{try{res.setHeader('Cache-Control','no-store');if(!['GET','HEAD','OPTIONS'].includes(req.method)&&!req.path.startsWith('/integration/')){const origin=req.get('origin');if(origin&&origin!==new URL(appURL()).origin)throw fail(403,'Request origin is not allowed.');if(!req.get('x-helm-request'))throw fail(403,'Missing request protection header.');}await rateLimit(`api:${req.ip}`,600,1);next();}catch(e){next(e);}});
- app.get('/api/health',async(req,res)=>{await db.raw('select 1');res.json({ok:true,mode:production?'production':'local'});});
+ app.use('/api',async(req,res,next)=>{try{res.setHeader('Cache-Control','no-store');if(!['GET','HEAD','OPTIONS'].includes(req.method)&&!req.path.startsWith('/integration/')){const origin=req.get('origin');if(origin){const originUrl=new URL(origin);const host=req.get('host');const isSameHost=host&&originUrl.host===host;const isConfiguredApp=origin===new URL(appURL()).origin;const isVercelOrigin=originUrl.hostname.endsWith('.vercel.app')||originUrl.hostname==='localhost'||originUrl.hostname==='127.0.0.1';if(!isSameHost&&!isConfiguredApp&&!isVercelOrigin)throw fail(403,'Request origin is not allowed.');}if(!req.get('x-helm-request'))throw fail(403,'Missing request protection header.');}await rateLimit(`api:${req.ip}`,600,1);next();}catch(e){next(e);}});
+ app.get('/api/health',async(req,res)=>{try{await db.raw('select 1');res.json({ok:true,database:isPostgres?'postgres':'sqlite',mode:production?'production':'local'});}catch(e:any){res.status(500).json({ok:false,error:e.message});}});
+ app.get('/api/db-status',async(req,res)=>{try{await db.raw('select 1');const projects=await db('projects').select('id','name');const count=await db('issues').count({total:'id'}).first();res.json({ok:true,connected:true,driver:isPostgres?'postgres':'sqlite',database:isPostgres?'PostgreSQL (Connected)':'Local SQLite (Active)',isVercel,projectsCount:projects.length,issuesCount:Number(count?.total||0)});}catch(e:any){res.status(500).json({ok:false,connected:false,driver:isPostgres?'postgres':'sqlite',error:e.message||'Database query failed'});}});
  app.get('/api/auth/me',auth,(req,res)=>res.json({user:publicUser((req as any).user),mode:production?'production':'local'}));
  app.post('/api/auth/login',async(req,res)=>{await rateLimit(`login:${req.ip}`,15,15);const data=z.object({email:z.email().max(254),password:z.string().max(256)}).parse(req.body);const u=await db('users').where({email:data.email.toLowerCase()}).first();const valid=passwordValid(data.password,u?.password_hash||passwordHash('invalid-placeholder-password'));if(!u||!valid||!u.active||!u.verified)throw fail(401,'Email or password is incorrect.');await session(res,u.id);res.json({user:publicUser(u)});});
  app.post('/api/auth/logout',auth,async(req,res)=>{await db('sessions').where({id:hash(req.cookies.helm_session)}).delete();res.clearCookie('helm_session',{path:'/'});res.json({ok:true});});

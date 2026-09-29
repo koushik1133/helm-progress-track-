@@ -48,8 +48,17 @@ async function api(url: string, options: RequestInit = {}) {
     ...options,
     headers: { 'X-Helm-Request': '1', ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...options.headers },
   });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || 'Request failed.');
+  const text = await r.text();
+  let data: any;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    if (!r.ok) {
+      throw new Error(text.slice(0, 160) || `Server error (${r.status})`);
+    }
+    throw new Error('Invalid server response');
+  }
+  if (!r.ok) throw new Error(data.error || data.message || `Request failed (${r.status})`);
   return data;
 }
 
@@ -167,10 +176,21 @@ function App() {
   const [toast, setToast] = useState('');
   const notify = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(''), 5000); }, []);
 
+  // Database Connection Info
+  const [dbStatus, setDbStatus] = useState<{ ok: boolean; driver: string; database: string; isVercel?: boolean } | null>(null);
+
   // ── Load Data ─────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
     setLoading(true); setListErr('');
-    try { setIssues(await api('/guest/issues')); }
+    try {
+      const [issueList, status] = await Promise.allSettled([
+        api('/guest/issues'),
+        api('/db-status')
+      ]);
+      if (issueList.status === 'fulfilled') setIssues(issueList.value);
+      else setListErr(issueList.reason.message);
+      if (status.status === 'fulfilled') setDbStatus(status.value);
+    }
     catch (e: any) { setListErr(e.message); }
     finally { setLoading(false); }
   }, []);
@@ -584,6 +604,28 @@ function App() {
 
             <span className="workspace-status"><span />{filtered.length} tickets</span>
 
+            {dbStatus && (
+              <span
+                title={dbStatus.database}
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  padding: '4px 8px',
+                  borderRadius: 6,
+                  background: dbStatus.driver === 'postgres' ? '#dcfce7' : '#fef3c7',
+                  color: dbStatus.driver === 'postgres' ? '#15803d' : '#92400e',
+                  border: `1px solid ${dbStatus.driver === 'postgres' ? '#bbf7d0' : '#fde68a'}`,
+                  cursor: 'default'
+                }}
+              >
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: dbStatus.driver === 'postgres' ? '#16a34a' : '#d97706' }} />
+                {dbStatus.driver === 'postgres' ? 'DB: Postgres' : 'DB: SQLite (Local)'}
+              </span>
+            )}
+
             <button className="button" onClick={() => {
               setForm(f => ({ ...f, type: activeTab === 'issues' ? 'Bug' : activeTab === 'improvements' ? 'Improvement' : 'Question' }));
               setShowModal(true);
@@ -595,6 +637,28 @@ function App() {
         </header>
 
         <div className="content">
+
+          {/* Vercel SQLite Warning Banner */}
+          {dbStatus?.isVercel && dbStatus?.driver === 'sqlite' && (
+            <div style={{
+              background: '#fffbeb',
+              border: '1px solid #fde68a',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 20,
+              fontSize: 11,
+              lineHeight: 1.6,
+              color: '#92400e',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12
+            }}>
+              <div>
+                <strong>Database Notice:</strong> Running on temporary SQLite in <code>/tmp</code>. To persist bug tickets permanently across Vercel deployments, connect a PostgreSQL database by adding <code>DATABASE_URL</code> in your Vercel Project Settings (Settings → Environment Variables).
+              </div>
+            </div>
+          )}
 
           {/* ── STATS CARDS ── */}
           <div className="stats-grid">

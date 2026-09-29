@@ -1,6 +1,11 @@
 import {randomUUID} from 'node:crypto';
 import {db,now} from './db.js';
-export const appURL=()=> (process.env.APP_URL||'http://localhost:5173').replace(/\/$/,'');
+export const appURL = () => {
+  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '');
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return 'http://localhost:5173';
+};
 export const escape=(s:unknown)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 export function template(title:string,body:string,link:string,label='Open issue'){const name=process.env.EMAIL_SENDER_NAME||'Helm Track';return {text:`${title}\n\n${body}\n\n${label}: ${link}\n\n${name}`,html:`<!doctype html><html><body style="background:#f4f5f1;font-family:Arial,sans-serif;color:#203b34;padding:24px"><div style="max-width:560px;margin:auto;background:white;padding:32px;border-radius:16px"><p style="font-weight:bold;letter-spacing:2px">HELM TRACK</p><h1 style="font-size:24px">${escape(title)}</h1><p style="white-space:pre-wrap;line-height:1.7">${escape(body)}</p><a href="${escape(link)}" style="display:inline-block;background:#234c40;color:white;text-decoration:none;border-radius:8px;padding:14px 20px">${escape(label)}</a><p style="color:#777;margin-top:30px">${escape(name)}</p></div></body></html>`};}
 export async function queue(q:any,{issue,kind,body,dedupe,recipients,subject,link}:{issue?:any,kind:string,body:string,dedupe:string,recipients?:string[],subject?:string,link?:string}){
