@@ -40,13 +40,24 @@ function createMissingDbProxy() {
     }
   });
 }
+var caContent = void 0;
+if (process.env.DATABASE_CA_FILE) {
+  try {
+    if (fs.existsSync(process.env.DATABASE_CA_FILE)) {
+      caContent = fs.readFileSync(process.env.DATABASE_CA_FILE, "utf8");
+    } else if (process.env.DATABASE_CA_FILE.includes("BEGIN CERTIFICATE")) {
+      caContent = process.env.DATABASE_CA_FILE;
+    }
+  } catch {
+  }
+}
 var db = !isPostgres && isVercel ? createMissingDbProxy() : knex(isPostgres ? {
   client: "pg",
   connection: {
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_NO_SSL === "true" ? false : {
       rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED === "true",
-      ...process.env.DATABASE_CA_FILE ? { ca: fs.readFileSync(process.env.DATABASE_CA_FILE, "utf8") } : {}
+      ...caContent ? { ca: caContent } : {}
     }
   },
   searchPath: [schema],
@@ -1213,11 +1224,29 @@ You have been invited to help test and improve our projects. Set up your account
 }
 
 // api/index.ts
-migrate().catch((err) => {
-  console.warn("[Vercel Serverless] Auto-migration notice:", err?.message || err);
-});
-var app = createApp();
-var index_default = app;
+var app;
+var startupError = null;
+try {
+  app = createApp();
+  migrate().catch((err) => {
+    console.warn("[Vercel Serverless] Auto-migration notice:", err?.message || err);
+  });
+} catch (e) {
+  startupError = e;
+  console.error("[Vercel Serverless] Startup error:", e);
+}
+function handler(req, res) {
+  if (startupError) {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({
+      error: "Serverless initialization failed",
+      message: startupError.message || String(startupError),
+      stack: startupError.stack
+    }));
+  }
+  return app(req, res);
+}
 export {
-  index_default as default
+  handler as default
 };

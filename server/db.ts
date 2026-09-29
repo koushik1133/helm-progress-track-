@@ -26,13 +26,24 @@ function createMissingDbProxy() {
   });
 }
 
+let caContent: string | undefined = undefined;
+if (process.env.DATABASE_CA_FILE) {
+  try {
+    if (fs.existsSync(process.env.DATABASE_CA_FILE)) {
+      caContent = fs.readFileSync(process.env.DATABASE_CA_FILE, 'utf8');
+    } else if (process.env.DATABASE_CA_FILE.includes('BEGIN CERTIFICATE')) {
+      caContent = process.env.DATABASE_CA_FILE;
+    }
+  } catch {}
+}
+
 export const db: any = (!isPostgres && isVercel) ? createMissingDbProxy() : knex(isPostgres ? {
   client: 'pg',
   connection: {
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_NO_SSL === 'true' ? false : {
       rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED === 'true',
-      ...(process.env.DATABASE_CA_FILE ? { ca: fs.readFileSync(process.env.DATABASE_CA_FILE, 'utf8') } : {})
+      ...(caContent ? { ca: caContent } : {})
     }
   },
   searchPath: [schema],
