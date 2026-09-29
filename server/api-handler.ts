@@ -1,5 +1,5 @@
-import { createApp } from '../server/app.js';
-import { migrate } from '../server/db.js';
+import { createApp } from './app.js';
+import { migrate } from './db.js';
 
 let app: any;
 let startupError: any = null;
@@ -26,4 +26,3 @@ export default function handler(req: any, res: any) {
   }
   return app(req, res);
 }
-

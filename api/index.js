@@ -1223,7 +1223,7 @@ You have been invited to help test and improve our projects. Set up your account
   return app2;
 }
 
-// api/index.ts
+// server/api-handler.ts
 var app;
 var startupError = null;
 try {
